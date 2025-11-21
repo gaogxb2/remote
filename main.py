@@ -1153,18 +1153,17 @@ class TabPage:
             except:
                 pass
         
-        # 处理普通字符输入（实时发送）
-        # 注意：Tkinter会自动插入字符，我们只需要发送到单板
+        # 处理普通字符输入（实时发送，仅依赖单板回显）
         if event.char and event.char.isprintable() and len(event.char) == 1:
-            # 如果已连接，实时发送字符（在字符显示之前发送）
             if self.connector and self.connector.connected:
                 try:
-                    # 使用after_idle确保在字符显示之后发送，避免时序问题
-                    self.root.after_idle(lambda: self.connector.send_command(event.char))
-                except:
+                    self.connector.send_command(event.char)
+                except Exception:
                     pass
-            # 允许Tkinter默认的字符插入行为
-            return None
+                return "break"  # 不在本地插入字符，等待单板回显
+            else:
+                messagebox.showwarning("警告", "请先连接设备")
+                return "break"
         
         # 其他特殊键由专门的处理函数处理
         return None
@@ -1250,56 +1249,40 @@ class TabPage:
     
     def on_output_return(self, event):
         """输出框回车事件"""
-        # 确保文本框是可编辑的
+        if not self.connector or not self.connector.connected:
+            messagebox.showwarning("警告", "请先连接设备")
+            return "break"
+
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
-        
-        # 如果已连接，发送换行符
-        if self.connector and self.connector.connected:
-            try:
-                # 发送换行符（\n）
-                self.connector.send_command('\n')
-            except:
-                pass
-        
-        # 在当前位置插入换行符
-        self.output_text.insert(tk.INSERT, '\n')
-        
-        # 更新输入提示符位置
-        self.output_text.mark_set(self.input_start_mark, tk.END)
-        self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
-        
-        # 添加新的输入提示符
-        self.add_input_prompt()
-        
+
+        try:
+            self.connector.send_command('\n')
+        except Exception:
+            pass
+
+        # 输入由单板回显处理，这里只确保光标在末尾
+        self.output_text.mark_set(tk.INSERT, tk.END)
+        self.output_text.see(tk.END)
         return "break"
     
     def on_output_backspace(self, event):
         """输出框退格事件"""
-        # 确保文本框是可编辑的
+        if not self.connector or not self.connector.connected:
+            messagebox.showwarning("警告", "请先连接设备")
+            return "break"
+
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
-        
-        cursor_pos = self.output_text.index(tk.INSERT)
+
         try:
-            input_start = self.output_text.index(self.input_start_mark)
-            if self.output_text.compare(cursor_pos, "<=", input_start):
-                # 不允许删除输入提示符
-                return "break"
-            
-            # 先执行默认的退格删除（让Tkinter处理）
-            # 然后发送退格字符到单板
-            if self.connector and self.connector.connected:
-                try:
-                    # 使用after_idle确保在删除之后发送
-                    self.root.after_idle(lambda: self.connector.send_command('\b'))
-                except:
-                    pass
-            
-            # 允许默认的退格行为
-            return None
-        except:
-            return None
+            # 发送删除/退格指令给单板（DEL字符）
+            self.connector.send_command('\x7f')
+        except Exception:
+            pass
+
+        # 不在本地删除，等待单板回显处理
+        return "break"
     
     def on_output_delete(self, event):
         """输出框删除事件"""
