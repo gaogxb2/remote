@@ -18,6 +18,7 @@ import os
 import paramiko
 from pathlib import Path
 import re
+import json
 
 
 class DeviceConnector:
@@ -542,6 +543,13 @@ class TabPage:
         self.command_history = []
         self.history_index = -1
         
+        # 配置信息
+        self.config = {
+            "connection": {},
+            "commands": [],
+            "sftp": {}
+        }
+        
         # 初始化文件图标
         self.init_file_icons()
         
@@ -741,11 +749,16 @@ class TabPage:
         # 绑定键盘事件
         self.output_text.bind("<Key>", self.on_output_key)
         self.output_text.bind("<Button-1>", self.on_output_click)
+        self.output_text.bind("<B1-Motion>", self.on_output_drag)
+        self.output_text.bind("<ButtonRelease-1>", self.on_output_release)
         self.output_text.bind("<Return>", self.on_output_return)
         self.output_text.bind("<BackSpace>", self.on_output_backspace)
         self.output_text.bind("<Delete>", self.on_output_delete)
         self.output_text.bind("<Control-v>", self.on_paste)  # 支持粘贴
         self.output_text.bind("<Command-v>", self.on_paste)  # macOS粘贴
+        
+        # 用于跟踪拖动状态
+        self.dragging = False
         
         # 初始化输入区域
         self.output_text.config(state=tk.NORMAL)
@@ -934,7 +947,7 @@ class TabPage:
         conn_type = self.conn_type.get()
         
         try:
-            if conn_type == "TCP网口":
+            if conn_type == "TCP":
                 host = self.host_entry.get().strip()
                 port = self.port_entry.get().strip()
                 if not host or not port:
@@ -960,6 +973,9 @@ class TabPage:
                     return
                 self.connector = SerialConnector(self.append_output)
                 success = self.connector.connect(port=port, baudrate=baudrate)
+                # 串口连接也保存配置（port作为host，baudrate作为port）
+                if success:
+                    self.save_connection_config(conn_type, port, baudrate)
             
             if success:
                 self.connect_btn.config(text="断开")
@@ -1091,6 +1107,21 @@ class TabPage:
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
         
+        # 检查是否有选中文本，如果有选中文本在输入区域之前，不允许输入
+        try:
+            sel_start = self.output_text.index(tk.SEL_FIRST)
+            sel_end = self.output_text.index(tk.SEL_LAST)
+            input_start = self.output_text.index(self.input_start_mark)
+            if sel_start and sel_end:
+                # 如果选中的文本在输入区域之前，不允许输入
+                if self.output_text.compare(sel_start, "<", input_start):
+                    # 只允许复制等操作，不允许输入
+                    if event.char and event.char.isprintable():
+                        return "break"
+        except:
+            # 没有选中文本，继续处理
+            pass
+        
         # 检查光标位置是否在输入区域内
         try:
             cursor_pos = self.output_text.index(tk.INSERT)
@@ -1106,14 +1137,16 @@ class TabPage:
                 pass
         
         # 处理普通字符输入（实时发送）
+        # 注意：Tkinter会自动插入字符，我们只需要发送到单板
         if event.char and event.char.isprintable() and len(event.char) == 1:
-            # 如果已连接，实时发送字符
+            # 如果已连接，实时发送字符（在字符显示之前发送）
             if self.connector and self.connector.connected:
                 try:
-                    self.connector.send_command(event.char)
+                    # 使用after_idle确保在字符显示之后发送，避免时序问题
+                    self.root.after_idle(lambda: self.connector.send_command(event.char))
                 except:
                     pass
-            # 允许正常显示字符
+            # 允许Tkinter默认的字符插入行为
             return None
         
         # 其他特殊键由专门的处理函数处理
@@ -1138,22 +1171,64 @@ class TabPage:
         return None
     
     def on_output_click(self, event):
-        """输出框点击事件"""
+        """输出框点击事件（鼠标按下）"""
         # 确保文本框是可编辑的
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
         
-        # 如果点击在输入区域之前，将光标移动到输入区域末尾
+        # 记录点击位置，用于判断是否是拖动
+        self.dragging = False
+        self.click_start_pos = self.output_text.index(f"@{event.x},{event.y}")
+        
+        # 如果点击在输入区域之前，允许选择文本但不允许编辑
         try:
             click_pos = self.output_text.index(f"@{event.x},{event.y}")
             input_start = self.output_text.index(self.input_start_mark)
             if self.output_text.compare(click_pos, "<", input_start):
-                self.output_text.mark_set(tk.INSERT, tk.END)
-                return "break"
+                # 允许在只读区域选择文本，但不移动光标到输入区域
+                # 让Tkinter处理正常的文本选择
+                return None
         except:
             # 如果没有输入标记，添加一个
-            self.add_input_prompt()
-            return "break"
+            try:
+                self.add_input_prompt()
+            except:
+                pass
+        
+        # 允许正常的点击和选择行为
+        return None
+    
+    def on_output_drag(self, event):
+        """输出框拖动事件"""
+        # 标记正在拖动
+        self.dragging = True
+        
+        # 允许正常的文本选择行为
+        return None
+    
+    def on_output_release(self, event):
+        """输出框鼠标释放事件"""
+        # 如果是在输入区域之前选择文本，确保光标不会停留在那里
+        if self.dragging:
+            try:
+                cursor_pos = self.output_text.index(tk.INSERT)
+                input_start = self.output_text.index(self.input_start_mark)
+                # 如果选择结束在输入区域之前，将光标移动到输入区域
+                if self.output_text.compare(cursor_pos, "<", input_start):
+                    # 检查是否有选中文本
+                    try:
+                        sel_start = self.output_text.index(tk.SEL_FIRST)
+                        sel_end = self.output_text.index(tk.SEL_LAST)
+                        # 如果有选中文本，保持选择，但光标移到输入区域
+                        if sel_start and sel_end:
+                            self.output_text.mark_set(tk.INSERT, tk.END)
+                    except:
+                        # 没有选中文本，移动光标到输入区域
+                        self.output_text.mark_set(tk.INSERT, tk.END)
+            except:
+                pass
+        
+        self.dragging = False
         return None
     
     def on_output_return(self, event):
@@ -1195,23 +1270,19 @@ class TabPage:
                 # 不允许删除输入提示符
                 return "break"
             
-            # 如果已连接，发送退格字符
+            # 先执行默认的退格删除（让Tkinter处理）
+            # 然后发送退格字符到单板
             if self.connector and self.connector.connected:
                 try:
-                    # 发送退格字符（\b或\x08）
-                    self.connector.send_command('\b')
+                    # 使用after_idle确保在删除之后发送
+                    self.root.after_idle(lambda: self.connector.send_command('\b'))
                 except:
                     pass
             
-            # 执行退格删除
-            if self.output_text.compare(cursor_pos, ">", input_start):
-                # 删除光标前一个字符
-                prev_pos = self.output_text.index(f"{cursor_pos} - 1 char")
-                self.output_text.delete(prev_pos, cursor_pos)
+            # 允许默认的退格行为
+            return None
         except:
-            pass
-        
-        return "break"
+            return None
     
     def on_output_delete(self, event):
         """输出框删除事件"""
@@ -1226,16 +1297,10 @@ class TabPage:
                 # 不允许删除输入区域之前的内容
                 return "break"
             
-            # 如果已连接，可以发送删除字符（可选）
-            # 大多数终端不支持删除键，所以这里只做本地删除
-            if self.output_text.compare(cursor_pos, "<", tk.END):
-                # 删除光标位置的字符
-                next_pos = self.output_text.index(f"{cursor_pos} + 1 char")
-                self.output_text.delete(cursor_pos, next_pos)
+            # 允许默认的删除行为
+            return None
         except:
-            pass
-        
-        return "break"
+            return None
     
     def append_output(self, text):
         """添加输出文本（线程安全）"""
@@ -1418,6 +1483,9 @@ class TabPage:
                 self.command_history.pop(0)
         self.history_index = -1
         
+        # 保存命令历史到配置
+        self.save_commands_config()
+        
         # 发送命令（会自动添加换行符）
         if self.connector.send_command(command):
             self.append_output(f"[快速发送] {command}\n")
@@ -1498,6 +1566,9 @@ class TabPage:
             self.remote_path_entry.insert(0, self.remote_path)
             self.refresh_remote_files()
             self.append_output(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] SFTP连接成功\n")
+            
+            # 保存SFTP配置
+            self.save_sftp_config(host, port, username, password)
         else:
             self.sftp_status_label.config(text="SFTP: 连接失败", foreground="red")
             messagebox.showerror("错误", f"SFTP连接失败: {error_msg}")
@@ -1800,6 +1871,107 @@ class TabPage:
         except Exception as e:
             messagebox.showerror("错误", f"下载失败: {str(e)}")
     
+    def save_connection_config(self, conn_type, host, port):
+        """保存连接配置"""
+        # 统一连接类型名称
+        if conn_type == "TCP网口":
+            conn_type = "TCP"
+        self.config["connection"] = {
+            "type": conn_type,
+            "host": host,
+            "port": port
+        }
+        # 通知主窗口保存配置
+        if hasattr(self.root, 'winfo_toplevel'):
+            top = self.root.winfo_toplevel()
+            if hasattr(top, 'save_config'):
+                top.save_config()
+    
+    def save_commands_config(self):
+        """保存命令历史配置"""
+        self.config["commands"] = self.command_history.copy()
+        # 通知主窗口保存配置
+        if hasattr(self.root, 'winfo_toplevel'):
+            top = self.root.winfo_toplevel()
+            if hasattr(top, 'save_config'):
+                top.save_config()
+    
+    def save_sftp_config(self, host, port, username, password):
+        """保存SFTP配置"""
+        self.config["sftp"] = {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password  # 注意：密码以明文保存
+        }
+        # 通知主窗口保存配置
+        if hasattr(self.root, 'winfo_toplevel'):
+            top = self.root.winfo_toplevel()
+            if hasattr(top, 'save_config'):
+                top.save_config()
+    
+    def load_config(self, config):
+        """加载配置"""
+        if not config:
+            return
+        
+        # 恢复连接配置
+        if "connection" in config:
+            conn_config = config["connection"]
+            conn_type = conn_config.get("type", "TCP")
+            host = conn_config.get("host", "")
+            port = conn_config.get("port", "")
+            
+            # 设置连接方式
+            if conn_type == "TCP":
+                self.conn_type.set("TCP网口")
+                if host:
+                    self.host_entry.delete(0, tk.END)
+                    self.host_entry.insert(0, host)
+                if port:
+                    self.port_entry.delete(0, tk.END)
+                    self.port_entry.insert(0, port)
+            elif conn_type == "Telnet":
+                self.conn_type.set("Telnet")
+                if host:
+                    self.host_entry.delete(0, tk.END)
+                    self.host_entry.insert(0, host)
+                if port:
+                    self.port_entry.delete(0, tk.END)
+                    self.port_entry.insert(0, port)
+            elif conn_type == "串口":
+                self.conn_type.set("串口")
+                if host:  # 串口的host是端口名
+                    self.serial_port_combo.set(host)
+                if port:  # 串口的port是波特率
+                    self.baudrate_combo.set(port)
+            self.on_conn_type_changed()
+        
+        # 恢复命令历史
+        if "commands" in config:
+            self.command_history = config["commands"].copy()
+        
+        # 恢复SFTP配置
+        if "sftp" in config:
+            sftp_config = config["sftp"]
+            host = sftp_config.get("host", "")
+            port = sftp_config.get("port", "22")
+            username = sftp_config.get("username", "")
+            password = sftp_config.get("password", "")
+            
+            if host:
+                self.sftp_host_entry.delete(0, tk.END)
+                self.sftp_host_entry.insert(0, host)
+            if port:
+                self.sftp_port_entry.delete(0, tk.END)
+                self.sftp_port_entry.insert(0, port)
+            if username:
+                self.sftp_user_entry.delete(0, tk.END)
+                self.sftp_user_entry.insert(0, username)
+            if password:
+                self.sftp_pass_entry.delete(0, tk.END)
+                self.sftp_pass_entry.insert(0, password)
+    
     def cleanup(self):
         """清理资源"""
         # 停止日志记录
@@ -1825,7 +1997,42 @@ class DeviceConnectionApp:
         self.plus_tab_frame = None  # "+"标签页框架
         self.ignore_tab_change = False  # 是否忽略标签页切换事件
         
+        # 配置文件路径
+        self.config_file = os.path.join(os.path.expanduser("~"), ".单板连接工具_config.json")
+        
+        # 加载配置
+        self.config = self.load_config()
+        
         self.setup_ui()
+        
+        # 窗口关闭时保存配置
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # 将save_config方法绑定到root，方便TabPage调用
+        self.root.save_config = self.save_config
+    
+    def load_config(self):
+        """加载配置文件"""
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"加载配置失败: {e}")
+        return {}
+    
+    def save_config(self):
+        """保存配置文件"""
+        try:
+            config = {}
+            for tab_name, tab_page in self.tabs.items():
+                if hasattr(tab_page, 'config'):
+                    config[tab_name] = tab_page.config
+            
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存配置失败: {e}")
     
     def setup_ui(self):
         """设置用户界面"""
@@ -1849,8 +2056,23 @@ class DeviceConnectionApp:
         
         ttk.Button(toolbar, text="关闭当前标签页", command=self.close_current_tab).pack(side=tk.LEFT, padx=5)
         
-        # 创建第一个标签页
-        self.add_tab()
+        # 创建第一个标签页（如果有保存的配置，恢复配置）
+        # 尝试加载第一个标签页的配置
+        first_tab_config = None
+        for tab_name in self.config.keys():
+            if tab_name != "+":
+                first_tab_config = self.config[tab_name]
+                break
+        
+        if first_tab_config:
+            # 使用配置中的标签名
+            first_tab_name = list(self.config.keys())[0] if self.config else None
+            if first_tab_name and first_tab_name != "+":
+                self.add_tab(first_tab_name, first_tab_config)
+            else:
+                self.add_tab()
+        else:
+            self.add_tab()
         
         # 添加"+"标签页
         self.add_plus_tab()
@@ -1980,6 +2202,9 @@ class DeviceConnectionApp:
     
     def on_closing(self):
         """窗口关闭时的处理"""
+        # 保存配置
+        self.save_config()
+        
         # 清理所有标签页
         for tab_name, tab_page in self.tabs.items():
             tab_page.cleanup()
