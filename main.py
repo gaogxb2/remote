@@ -945,6 +945,9 @@ class TabPage:
     def connect(self):
         """连接设备"""
         conn_type = self.conn_type.get()
+        success = False
+        host = ""
+        port = ""
         
         try:
             if conn_type == "TCP":
@@ -983,6 +986,9 @@ class TabPage:
                 self.append_output(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 连接成功\n")
                 # 连接成功后确保输入提示符存在
                 self.enable_input()
+                
+                if conn_type in ("TCP", "Telnet"):
+                    self.save_connection_config(conn_type, host, port)
             else:
                 self.status_label.config(text="状态: 连接失败", foreground="red")
                 
