@@ -20,15 +20,25 @@ from pathlib import Path
 import re
 import time
 _current_send_handler = None
-_current_receive_handler = None
-text = None  # 全局捕获结果
-_capture_lock = threading.Lock()
+_current_tab = None
 
 
 def register_send_handler(handler):
     """注册全局发送函数的处理器"""
     global _current_send_handler
     _current_send_handler = handler
+
+
+def register_active_tab(tab_page):
+    """记录当前活动的标签页"""
+    global _current_tab
+    _current_tab = tab_page
+
+
+def _require_active_tab():
+    if not _current_tab:
+        raise RuntimeError("当前没有激活的标签页，请先选择一个连接。")
+    return _current_tab
 
 
 def send(command):
@@ -40,33 +50,22 @@ def send(command):
     return _current_send_handler(command)
 
 
-def register_receive_handler(handler):
-    """注册全局回显捕获处理器"""
-    global _current_receive_handler
-    _current_receive_handler = handler
-
-
 def start_receive():
     """开始捕获单板回显"""
-    global text
-    with _capture_lock:
-        text = ""
-    register_receive_handler(_default_receive_handler)
+    tab = _require_active_tab()
+    tab.start_capture()
 
 
-def stop_receive():
-    """结束捕获单板回显"""
-    global text
-    register_receive_handler(None)
-    return text
+def get_receive():
+    """获取当前捕获内容，不结束捕获"""
+    tab = _require_active_tab()
+    return tab.get_capture()
 
 
-def _default_receive_handler(chunk):
-    """默认的回显捕获处理"""
-    global text
-    with _capture_lock:
-        if text is not None:
-            text += chunk
+def end_receive():
+    """结束捕获单板回显并返回内容"""
+    tab = _require_active_tab()
+    return tab.end_capture()
 import json
 
 
@@ -606,6 +605,8 @@ class TabPage:
         # 命令历史
         self.command_history = []
         self.history_index = -1
+        self.capture_text = None
+        self.capture_lock = threading.Lock()
         
         # 智能命令模板
         self.smart_templates = {
@@ -614,13 +615,15 @@ class TabPage:
             "日志采集": "dmesg | tail -n 50\njournalctl -xe --no-pager\ntail -n 100 /var/log/syslog"
         }
         self.current_template_name = ""
+        self.last_smart_code = ""
         
         # 配置信息
         self.config = {
             "connection": {},
             "commands": [],
             "sftp": {},
-            "smart_templates": self.smart_templates.copy()
+            "smart_templates": self.smart_templates.copy(),
+            "smart_code": ""
         }
         
         # 初始化文件图标
@@ -903,39 +906,50 @@ class TabPage:
         ttk.Button(header_frame, text="帮助", command=self.show_smart_help).pack(side=tk.RIGHT)
 
         title_frame = ttk.Frame(smart_frame)
-        title_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
-        ttk.Label(title_frame, text="模板标题:").pack(side=tk.LEFT)
+        title_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 2))
+        ttk.Label(title_frame, text="模板标题:").grid(row=0, column=0, sticky=tk.W)
         self.smart_title_entry = ttk.Entry(title_frame)
-        self.smart_title_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
-        
-        combo_frame = ttk.Frame(smart_frame)
-        combo_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=5)
+        self.smart_title_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 0))
+        ttk.Label(title_frame, text="选择模板:").grid(row=1, column=0, sticky=tk.W, pady=(2, 0))
+        combo_inner = ttk.Frame(title_frame)
+        combo_inner.grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(5, 0))
         self.smart_template_combo = ttk.Combobox(
-            combo_frame,
-            state="readonly")
+            combo_inner,
+            state="readonly", width=18)
         self.smart_template_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.smart_template_combo.bind("<<ComboboxSelected>>", self.apply_smart_template)
-        ttk.Button(combo_frame, text="保存模板", command=self.save_smart_template).pack(side=tk.LEFT, padx=5)
+        ttk.Button(combo_inner, text="保存为模板", command=self.save_smart_template).pack(side=tk.LEFT, padx=5)
+        title_frame.columnconfigure(1, weight=1)
 
-        self.smart_text = scrolledtext.ScrolledText(smart_frame, height=15, wrap=tk.WORD)
-        self.smart_text.grid(row=3, column=0, sticky=(tk.N, tk.S, tk.E, tk.W), pady=5)
+        self.smart_text = scrolledtext.ScrolledText(
+            smart_frame,
+            height=12,
+            wrap=tk.WORD,
+            font=("Consolas", 11),
+            background="#1e1e1e",
+            foreground="#dcdcdc",
+            insertbackground="#ffd700"
+        )
+        self.smart_text.grid(row=2, column=0, sticky=(tk.N, tk.S, tk.E, tk.W), pady=2)
         self.smart_text.bind("<Tab>", self.smart_text_tab)
 
         smart_btn_frame = ttk.Frame(smart_frame)
-        smart_btn_frame.grid(row=4, column=0, sticky=tk.EW, pady=(5, 0))
+        smart_btn_frame.grid(row=3, column=0, sticky=tk.EW, pady=(2, 0))
         ttk.Button(smart_btn_frame, text="发送智能命令", command=self.send_smart_command).pack(
             side=tk.LEFT, padx=5)
         ttk.Button(smart_btn_frame, text="以Python执行", command=self.run_smart_python).pack(
             side=tk.LEFT, padx=5)
         ttk.Button(smart_btn_frame, text="清空", command=lambda: self.smart_text.delete("1.0", tk.END)).pack(
             side=tk.LEFT, padx=5)
+        ttk.Button(smart_btn_frame, text="保存代码", command=self.manual_save_smart_code).pack(
+            side=tk.LEFT, padx=5)
         
         self.refresh_smart_templates()
         
         # 智能脚本回显
         echo_frame = ttk.LabelFrame(smart_frame, text="脚本输出", padding="5")
-        echo_frame.grid(row=5, column=0, sticky=(tk.W, tk.E, tk.N))
-        self.smart_output = scrolledtext.ScrolledText(echo_frame, height=6, wrap=tk.WORD, state=tk.DISABLED)
+        echo_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
+        self.smart_output = scrolledtext.ScrolledText(echo_frame, height=5, wrap=tk.WORD, state=tk.DISABLED)
         self.smart_output.pack(fill=tk.BOTH, expand=True)
         
         # SFTP连接设置
@@ -1452,8 +1466,7 @@ class TabPage:
             while True:
                 text = self.output_queue.get_nowait()
                 self.output_text.config(state=tk.NORMAL)
-                if _current_receive_handler:
-                    _current_receive_handler(text)
+                self.append_capture(text)
                 # 在输入提示符之前插入输出内容
                 input_start = self.output_text.index(self.input_start_mark)
                 # 先处理控制字符（如BS、DEL）并获取清理后的文本
@@ -1717,6 +1730,29 @@ class TabPage:
         
         return "break"
     
+    def start_capture(self):
+        with self.capture_lock:
+            self.capture_text = ""
+    
+    def append_capture(self, chunk):
+        with self.capture_lock:
+            if self.capture_text is not None:
+                self.capture_text += chunk
+    
+    def get_capture(self):
+        with self.capture_lock:
+            if self.capture_text is None:
+                return ""
+            return self.capture_text
+    
+    def end_capture(self):
+        with self.capture_lock:
+            if self.capture_text is None:
+                return ""
+            data = self.capture_text
+            self.capture_text = None
+            return data
+    
     def refresh_smart_templates(self, select_title=""):
         titles = [""] + list(self.smart_templates.keys())
         self.smart_template_combo['values'] = titles
@@ -1787,6 +1823,7 @@ class TabPage:
                 self.append_output(f"[错误] 智能命令发送失败: {cmd}\n")
                 break
         self.smart_text.focus_set()
+        self.save_current_smart_code()
         messagebox.showinfo("提示", f"智能命令发送完成，共发送 {sent} 条。")
     
     def smart_print(self, message):
@@ -1807,7 +1844,8 @@ class TabPage:
             "智能命令编辑支持以下内置函数：\n"
             "• send(cmd): 发送字符串命令到当前连接\n"
             "• start_receive(): 开始捕获单板回显\n"
-            "• stop_receive(): 结束捕获并返回文本\n"
+            "• get_receive(): 获取捕获内容但不结束\n"
+            "• end_receive(): 结束捕获并返回文本\n"
             "• print(...): 将信息输出到脚本输出窗口\n"
             "• wait(seconds): 等同于 time.sleep，用于延时\n\n"
             "可以编写多行 Python 代码，例如循环发送命令、等待回显等。"
@@ -1820,12 +1858,14 @@ class TabPage:
         if not code:
             messagebox.showinfo("提示", "请先输入需要执行的Python代码")
             return
+        self.save_current_smart_code()
         
         def worker():
             local_context = {
                 "send": send,
                 "start_receive": start_receive,
-                "stop_receive": stop_receive,
+                "end_receive": end_receive,
+                "get_receive": get_receive,
                 "wait": time.sleep,
                 "sleep": time.sleep
             }
@@ -1847,6 +1887,21 @@ class TabPage:
         root = self.root.winfo_toplevel()
         if hasattr(root, "save_config"):
             root.save_config()
+    
+    def save_current_smart_code(self):
+        """保存智能命令编辑区当前内容"""
+        content = self.smart_text.get("1.0", tk.END).rstrip()
+        self.last_smart_code = content
+        self.config["smart_code"] = content
+        top = self.root.winfo_toplevel()
+        if hasattr(top, "save_config"):
+            top.save_config()
+        return content
+    
+    def manual_save_smart_code(self):
+        """手动保存智能命令编辑区内容"""
+        content = self.save_current_smart_code()
+        messagebox.showinfo("提示", "代码块内容已保存" if content else "当前代码块为空，已保存为空内容")
     
     def toggle_sftp_connection(self):
         """切换SFTP连接状态"""
@@ -2274,6 +2329,12 @@ class TabPage:
             self.config["smart_templates"] = self.smart_templates.copy()
             self.refresh_smart_templates()
         
+        # 恢复智能命令代码块
+        if "smart_code" in config:
+            self.last_smart_code = config.get("smart_code", "")
+            self.smart_text.delete("1.0", tk.END)
+            self.smart_text.insert(tk.END, self.last_smart_code)
+        
         # 恢复SFTP配置
         if "sftp" in config:
             sftp_config = config["sftp"]
@@ -2405,6 +2466,12 @@ class DeviceConnectionApp:
         if tab_name is None:
             tab_name = f"单板 {self.tab_counter}"
             self.tab_counter += 1
+        else:
+            match = re.search(r'(\d+)$', tab_name.strip())
+            if match:
+                next_idx = int(match.group(1)) + 1
+                if next_idx > self.tab_counter:
+                    self.tab_counter = next_idx
         
         # 设置标志，忽略标签页切换事件
         self.ignore_tab_change = True
@@ -2508,6 +2575,7 @@ class DeviceConnectionApp:
                 for i in range(self.notebook.index("end")):
                     if self.notebook.tab(i, "text") == first_tab_name:
                         self.notebook.select(i)
+                        self.set_active_tab(first_tab_name)
                         break
             
             # 恢复标志
@@ -2538,6 +2606,7 @@ class DeviceConnectionApp:
         tab_page = self.tabs.get(tab_name)
         if tab_page:
             register_send_handler(tab_page.send_command)
+            register_active_tab(tab_page)
     
     def on_closing(self):
         """窗口关闭时的处理"""
