@@ -1053,22 +1053,33 @@ class TabPage:
     def add_input_prompt(self):
         """添加输入提示符"""
         self.output_text.config(state=tk.NORMAL)
-        # 检查是否已经有提示符，避免重复添加
+        prompt_appended = False
         try:
             end_pos = self.output_text.index(tk.END)
             if end_pos != "1.0":
-                # 获取最后一行内容
                 last_line_start = self.output_text.index(f"{end_pos} linestart")
                 last_line = self.output_text.get(last_line_start, end_pos)
                 if not last_line.rstrip().endswith(self.input_prompt.rstrip()):
                     self.output_text.insert(tk.END, self.input_prompt)
-        except:
+                    prompt_appended = True
+            else:
+                self.output_text.insert(tk.END, self.input_prompt)
+                prompt_appended = True
+        except Exception:
             self.output_text.insert(tk.END, self.input_prompt)
+            prompt_appended = True
         
-        # 设置输入区域标记
-        self.output_text.mark_set(self.input_start_mark, tk.END)
+        # 计算提示符起始位置
+        if prompt_appended:
+            prompt_start = self.output_text.index(f"{tk.END} - {len(self.input_prompt)} chars")
+        else:
+            end_pos = self.output_text.index(tk.END)
+            prompt_start = self.output_text.index(f"{end_pos} - {len(self.input_prompt)} chars")
+        
+        # 设置输入区域标记到提示符起点
+        self.output_text.mark_set(self.input_start_mark, prompt_start)
         self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
-        # 将光标移动到输入区域
+        # 将光标移动到输入区域末尾
         self.output_text.mark_set(tk.INSERT, tk.END)
         self.output_text.see(tk.END)
         self.output_text.config(state=tk.NORMAL)
@@ -2077,7 +2088,7 @@ class DeviceConnectionApp:
         # 添加"+"标签页
         self.add_plus_tab()
     
-    def add_tab(self, tab_name=None):
+    def add_tab(self, tab_name=None, config=None):
         """添加新标签页"""
         if tab_name is None:
             tab_name = f"单板 {self.tab_counter}"
@@ -2101,6 +2112,13 @@ class DeviceConnectionApp:
         # 创建标签页对象
         tab_page = TabPage(tab_frame, tab_name, self.root)
         self.tabs[tab_name] = tab_page
+        
+        # 如果提供了配置，加载配置
+        if config:
+            try:
+                tab_page.load_config(config)
+            except Exception as e:
+                print(f"加载标签页 {tab_name} 配置失败: {e}")
         
         # 切换到新标签页
         self.notebook.select(tab_frame)
