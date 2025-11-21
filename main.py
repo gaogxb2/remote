@@ -100,40 +100,88 @@ class TCPConnector(DeviceConnector):
             return False
     
     def _read_data(self):
-        import select
         import socket
-        while not self.stop_flag and self.connected:
-            try:
-                ready, _, _ = select.select([self.socket], [], [], 0.1)
-                if ready:
-                    data = self.socket.recv(4096)
-                    if data:
-                        self.output_callback(data.decode('utf-8', errors='ignore'))
-                    else:
-                        # 连接被关闭
-                        break
-            except socket.timeout:
-                # 超时是正常的，继续等待数据
-                continue
-            except OSError as e:
-                # 连接错误，中断连接
-                if not self.stop_flag:
-                    self.output_callback(f"[错误] 连接错误: {str(e)}\n")
-                break
-            except Exception as e:
-                # 其他错误，检查是否是连接相关
-                error_str = str(e).lower()
-                if 'timeout' in error_str or 'timed out' in error_str:
-                    # 超时错误，继续等待
+        import sys
+        import time
+        
+        # Windows上select可能不可用，使用轮询方式
+        if sys.platform == 'win32':
+            # Windows使用轮询方式
+            while not self.stop_flag and self.connected:
+                try:
+                    # 尝试接收数据（非阻塞）
+                    try:
+                        data = self.socket.recv(4096)
+                        if data:
+                            self.output_callback(data.decode('utf-8', errors='ignore'))
+                        else:
+                            # 连接被关闭
+                            break
+                    except socket.error as e:
+                        if e.errno == 10035:  # WSAEWOULDBLOCK on Windows
+                            # 没有数据可读，等待一下
+                            time.sleep(0.1)
+                            continue
+                        else:
+                            raise
+                except socket.timeout:
+                    # 超时是正常的，继续等待数据
                     continue
-                elif 'broken pipe' in error_str or 'connection' in error_str:
-                    # 连接断开，中断
+                except OSError as e:
+                    # 连接错误，中断连接
                     if not self.stop_flag:
-                        self.output_callback(f"[错误] 连接断开: {str(e)}\n")
+                        self.output_callback(f"[错误] 连接错误: {str(e)}\n")
                     break
-                else:
-                    # 其他错误，继续尝试
+                except Exception as e:
+                    # 其他错误，检查是否是连接相关
+                    error_str = str(e).lower()
+                    if 'timeout' in error_str or 'timed out' in error_str:
+                        # 超时错误，继续等待
+                        continue
+                    elif 'broken pipe' in error_str or 'connection' in error_str or '10054' in str(e):
+                        # 连接断开，中断
+                        if not self.stop_flag:
+                            self.output_callback(f"[错误] 连接断开: {str(e)}\n")
+                        break
+                    else:
+                        # 其他错误，继续尝试
+                        time.sleep(0.1)
+                        continue
+        else:
+            # Linux/macOS使用select
+            import select
+            while not self.stop_flag and self.connected:
+                try:
+                    ready, _, _ = select.select([self.socket], [], [], 0.1)
+                    if ready:
+                        data = self.socket.recv(4096)
+                        if data:
+                            self.output_callback(data.decode('utf-8', errors='ignore'))
+                        else:
+                            # 连接被关闭
+                            break
+                except socket.timeout:
+                    # 超时是正常的，继续等待数据
                     continue
+                except OSError as e:
+                    # 连接错误，中断连接
+                    if not self.stop_flag:
+                        self.output_callback(f"[错误] 连接错误: {str(e)}\n")
+                    break
+                except Exception as e:
+                    # 其他错误，检查是否是连接相关
+                    error_str = str(e).lower()
+                    if 'timeout' in error_str or 'timed out' in error_str:
+                        # 超时错误，继续等待
+                        continue
+                    elif 'broken pipe' in error_str or 'connection' in error_str:
+                        # 连接断开，中断
+                        if not self.stop_flag:
+                            self.output_callback(f"[错误] 连接断开: {str(e)}\n")
+                        break
+                    else:
+                        # 其他错误，继续尝试
+                        continue
         self.connected = False
 
 
@@ -444,7 +492,7 @@ class TabPage:
         scrollable_frame.columnconfigure(0, weight=1)
         scrollable_frame.rowconfigure(0, weight=1)
         self.frame.columnconfigure(1, weight=1)
-        self.frame.rowconfigure(2, weight=1)
+        self.frame.rowconfigure(3, weight=1)
         
         # 保存canvas引用以便后续使用
         self.canvas = canvas
@@ -453,6 +501,15 @@ class TabPage:
         self.sftp_connector = None
         self.local_path = os.path.expanduser("~")
         self.remote_path = "/"
+        
+        # 日志记录相关
+        self.log_enabled = False
+        self.log_file = None
+        self.log_file_path = None
+        
+        # 命令历史
+        self.command_history = []
+        self.history_index = -1
         
         # 初始化文件图标
         self.init_file_icons()
@@ -664,12 +721,47 @@ class TabPage:
         self.output_text.insert(tk.END, "请先连接设备...\n")
         self.output_text.config(state=tk.DISABLED)
         
-        # 清空按钮
-        ttk.Button(output_frame, text="清空输出", command=self.clear_output).grid(row=1, column=0, pady=5)
+        # 输出控制按钮
+        output_buttons = ttk.Frame(output_frame)
+        output_buttons.grid(row=1, column=0, pady=5)
+        
+        ttk.Button(output_buttons, text="清空输出", command=self.clear_output).pack(side=tk.LEFT, padx=5)
+        
+        # 日志记录开关
+        self.log_checkbox = ttk.Checkbutton(output_buttons, text="记录日志", command=self.toggle_log)
+        self.log_checkbox.pack(side=tk.LEFT, padx=5)
+        
+        # 命令发送区域
+        cmd_send_frame = ttk.LabelFrame(self.frame, text="快速命令发送", padding="10")
+        cmd_send_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        cmd_send_frame.columnconfigure(0, weight=1)
+        
+        cmd_input_frame = ttk.Frame(cmd_send_frame)
+        cmd_input_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        cmd_input_frame.columnconfigure(1, weight=1)
+        
+        ttk.Label(cmd_input_frame, text="命令:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.quick_cmd_entry = ttk.Entry(cmd_input_frame, width=50)
+        self.quick_cmd_entry.grid(row=0, column=1, padx=5, pady=5, sticky=(tk.W, tk.E))
+        self.quick_cmd_entry.bind("<Return>", lambda e: self.send_quick_command())
+        self.quick_cmd_entry.bind("<Up>", lambda e: self.history_up())
+        self.quick_cmd_entry.bind("<Down>", lambda e: self.history_down())
+        
+        ttk.Button(cmd_input_frame, text="发送", command=self.send_quick_command).grid(row=0, column=2, padx=5, pady=5)
+        
+        # 常用命令按钮
+        common_cmds_frame = ttk.Frame(cmd_send_frame)
+        common_cmds_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
+        
+        common_commands = ["ls", "pwd", "ifconfig", "ps", "df -h"]
+        for i, cmd in enumerate(common_commands):
+            btn = ttk.Button(common_cmds_frame, text=cmd, width=10, 
+                           command=lambda c=cmd: self.send_quick_command_text(c))
+            btn.grid(row=0, column=i, padx=2)
         
         # SFTP文件传输区域
         sftp_frame = ttk.LabelFrame(self.frame, text="SFTP文件传输", padding="10")
-        sftp_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        sftp_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         sftp_frame.columnconfigure(0, weight=1)
         sftp_frame.columnconfigure(1, weight=1)
         sftp_frame.rowconfigure(1, weight=1)
@@ -1107,6 +1199,16 @@ class TabPage:
     def append_output(self, text):
         """添加输出文本（线程安全）"""
         self.output_queue.put(text)
+        # 如果启用了日志记录，写入日志文件
+        if self.log_enabled and self.log_file:
+            try:
+                # 移除ANSI转义序列后写入日志
+                clean_text = re.sub(r'\033\[[0-9;]*m', '', text)
+                self.log_file.write(clean_text)
+                self.log_file.flush()  # 实时写入
+            except Exception as e:
+                # 日志写入失败，不影响程序运行
+                pass
     
     def check_output_queue(self):
         """检查输出队列并更新显示"""
@@ -1215,6 +1317,107 @@ class TabPage:
         # 重新添加输入提示符
         self.add_input_prompt()
         self.output_text.config(state=tk.NORMAL)
+    
+    def toggle_log(self):
+        """切换日志记录状态"""
+        if self.log_checkbox.instate(['selected']):
+            # 启用日志记录
+            self.start_logging()
+        else:
+            # 禁用日志记录
+            self.stop_logging()
+    
+    def start_logging(self):
+        """开始记录日志"""
+        try:
+            # 创建日志目录
+            log_dir = os.path.join(os.path.expanduser("~"), "单板连接日志")
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            
+            # 生成日志文件名（带时间戳）
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_filename = f"{self.tab_name}_{timestamp}.txt"
+            self.log_file_path = os.path.join(log_dir, log_filename)
+            
+            # 打开日志文件（追加模式）
+            self.log_file = open(self.log_file_path, 'a', encoding='utf-8')
+            self.log_enabled = True
+            self.append_output(f"[日志] 开始记录日志到: {self.log_file_path}\n")
+        except Exception as e:
+            messagebox.showerror("错误", f"启动日志记录失败: {str(e)}")
+            self.log_checkbox.state(['!selected'])
+            self.log_enabled = False
+    
+    def stop_logging(self):
+        """停止记录日志"""
+        if self.log_file:
+            try:
+                self.log_file.close()
+                self.append_output(f"[日志] 日志已保存到: {self.log_file_path}\n")
+            except:
+                pass
+            self.log_file = None
+        self.log_enabled = False
+    
+    def send_quick_command(self):
+        """发送快速命令"""
+        command = self.quick_cmd_entry.get().strip()
+        if not command:
+            return
+        
+        if not self.connector or not self.connector.connected:
+            messagebox.showwarning("警告", "请先连接设备")
+            return
+        
+        # 添加到命令历史
+        if not self.command_history or self.command_history[-1] != command:
+            self.command_history.append(command)
+            if len(self.command_history) > 100:  # 限制历史记录数量
+                self.command_history.pop(0)
+        self.history_index = -1
+        
+        # 发送命令
+        if self.connector.send_command(command):
+            self.append_output(f"[快速发送] {command}\n")
+            self.quick_cmd_entry.delete(0, tk.END)
+        else:
+            messagebox.showerror("错误", "发送命令失败")
+    
+    def send_quick_command_text(self, command):
+        """发送快速命令文本（从按钮）"""
+        self.quick_cmd_entry.delete(0, tk.END)
+        self.quick_cmd_entry.insert(0, command)
+        self.send_quick_command()
+    
+    def history_up(self):
+        """命令历史向上"""
+        if not self.command_history:
+            return "break"
+        
+        if self.history_index == -1:
+            self.history_index = len(self.command_history) - 1
+        elif self.history_index > 0:
+            self.history_index -= 1
+        
+        self.quick_cmd_entry.delete(0, tk.END)
+        self.quick_cmd_entry.insert(0, self.command_history[self.history_index])
+        return "break"
+    
+    def history_down(self):
+        """命令历史向下"""
+        if not self.command_history:
+            return "break"
+        
+        if self.history_index < len(self.command_history) - 1:
+            self.history_index += 1
+            self.quick_cmd_entry.delete(0, tk.END)
+            self.quick_cmd_entry.insert(0, self.command_history[self.history_index])
+        else:
+            self.history_index = -1
+            self.quick_cmd_entry.delete(0, tk.END)
+        
+        return "break"
     
     def toggle_sftp_connection(self):
         """切换SFTP连接状态"""
@@ -1555,6 +1758,10 @@ class TabPage:
     
     def cleanup(self):
         """清理资源"""
+        # 停止日志记录
+        if self.log_enabled:
+            self.stop_logging()
+        
         if self.connector and self.connector.connected:
             self.disconnect()
         if self.sftp_connector and self.sftp_connector.connected:
@@ -1736,10 +1943,30 @@ class DeviceConnectionApp:
 
 
 def main():
-    root = tk.Tk()
-    app = DeviceConnectionApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_closing)
-    root.mainloop()
+    # Windows兼容性设置
+    if sys.platform == 'win32':
+        # 设置控制台编码为UTF-8（如果从命令行运行）
+        try:
+            import codecs
+            sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+            sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+        except:
+            pass
+    
+    try:
+        root = tk.Tk()
+        app = DeviceConnectionApp(root)
+        root.protocol("WM_DELETE_WINDOW", app.on_closing)
+        root.mainloop()
+    except Exception as e:
+        # 显示错误信息
+        import traceback
+        error_msg = f"程序启动失败: {str(e)}\n\n{traceback.format_exc()}"
+        print(error_msg)
+        try:
+            messagebox.showerror("错误", error_msg)
+        except:
+            pass
 
 
 if __name__ == "__main__":
