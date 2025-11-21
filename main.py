@@ -82,11 +82,21 @@ class TCPConnector(DeviceConnector):
         if not self.connected or not self.socket:
             return False
         try:
+            # 临时设置为阻塞模式以确保数据发送完成
+            was_blocking = self.socket.getblocking()
+            self.socket.setblocking(True)
             data = (command + '\n').encode('utf-8')
             self.socket.sendall(data)
+            # 恢复原来的阻塞模式
+            self.socket.setblocking(was_blocking)
             return True
         except Exception as e:
             self.output_callback(f"[错误] 发送命令失败: {str(e)}\n")
+            # 尝试恢复阻塞模式
+            try:
+                self.socket.setblocking(False)
+            except:
+                pass
             return False
     
     def _read_data(self):
@@ -448,7 +458,7 @@ class TabPage:
         self.init_file_icons()
         
         # ANSI颜色解析相关
-        self.ansi_pattern = re.compile(r'\033\[([0-9;]+)m')
+        self.ansi_pattern = re.compile(r'\033\[([0-9;]*)m')
         self.current_fg_color = "#FFFFFF"  # 默认白色
         self.current_bg_color = None  # 默认背景色
         
@@ -874,21 +884,28 @@ class TabPage:
             full_text = self.output_text.get(start_pos, end_pos)
             # 移除提示符和换行符，获取实际命令
             if full_text.startswith(self.input_prompt):
-                command = full_text[len(self.input_prompt):].strip()
+                command = full_text[len(self.input_prompt):]
             else:
-                command = full_text.strip()
-            # 移除末尾的换行符（如果有）
-            command = command.rstrip('\n\r')
+                command = full_text
+            # 移除末尾的换行符和空白字符
+            command = command.rstrip('\n\r').strip()
             return command
         except Exception as e:
             # 如果获取失败，尝试从最后一行获取
             try:
                 end_pos = self.output_text.index(tk.END)
+                if end_pos == "1.0":
+                    return ""
                 last_line_start = self.output_text.index(f"{end_pos} linestart")
                 last_line = self.output_text.get(last_line_start, end_pos)
+                # 移除提示符
                 if last_line.startswith(self.input_prompt):
-                    return last_line[len(self.input_prompt):].strip()
-                return last_line.strip()
+                    command = last_line[len(self.input_prompt):]
+                else:
+                    command = last_line
+                # 移除换行符和空白字符
+                command = command.rstrip('\n\r').strip()
+                return command
             except:
                 return ""
     
@@ -1019,39 +1036,41 @@ class TabPage:
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
         
-        # 获取当前输入的命令（从输入提示符到文本末尾的所有内容）
+        # 先获取当前输入的命令（在删除之前）
         command = self.get_input_command()
         
-        if command:
-            # 移除当前输入提示符和命令
+        # 移除当前输入提示符和命令
+        try:
+            start_pos = self.output_text.index(self.input_start_mark)
+            end_pos = self.output_text.index(tk.END)
+            self.output_text.delete(start_pos, end_pos)
+        except:
+            # 如果获取位置失败，尝试从最后一行获取
             try:
-                start_pos = self.output_text.index(self.input_start_mark)
                 end_pos = self.output_text.index(tk.END)
-                self.output_text.delete(start_pos, end_pos)
+                last_line_start = self.output_text.index(f"{end_pos} linestart")
+                self.output_text.delete(last_line_start, end_pos)
             except:
-                # 如果获取位置失败，尝试从最后一行获取
-                try:
-                    end_pos = self.output_text.index(tk.END)
-                    last_line_start = self.output_text.index(f"{end_pos} linestart")
-                    self.output_text.delete(last_line_start, end_pos)
-                except:
-                    pass
-            
-            # 显示发送的命令
+                pass
+        
+        # 显示发送的命令
+        if command:
             self.output_text.insert(tk.END, f"{self.input_prompt}{command}\n")
-            self.output_text.see(tk.END)
-            
-            # 发送命令到单板
-            if self.connector and self.connector.connected:
-                if not self.connector.send_command(command):
-                    messagebox.showerror("错误", "发送命令失败")
-            
-            # 添加新的输入提示符
-            self.add_input_prompt()
         else:
-            # 即使没有命令，也添加新行和提示符
-            self.output_text.insert(tk.END, "\n")
-            self.add_input_prompt()
+            self.output_text.insert(tk.END, f"{self.input_prompt}\n")
+        self.output_text.see(tk.END)
+        
+        # 发送命令到单板
+        if command and self.connector and self.connector.connected:
+            try:
+                success = self.connector.send_command(command)
+                if not success:
+                    self.append_output(f"[错误] 发送命令失败: {command}\n")
+            except Exception as e:
+                self.append_output(f"[错误] 发送命令异常: {str(e)}\n")
+        
+        # 添加新的输入提示符
+        self.add_input_prompt()
         
         return "break"
     
@@ -1138,33 +1157,39 @@ class TabPage:
                     insert_pos = self.output_text.index(tk.END)
             
             # 解析ANSI代码
-            codes = match.group(1).split(';')
-            for code_str in codes:
-                if not code_str:
-                    continue
-                try:
-                    code = int(code_str)
-                    if code == 0:
-                        # 重置所有属性
-                        current_fg = "#FFFFFF"
-                        current_bg = None
-                    elif code == 1:
-                        # 粗体（暂时忽略）
+            code_str = match.group(1)
+            # 如果没有代码（如 \033[m），视为重置（相当于 \033[0m）
+            if not code_str:
+                current_fg = "#FFFFFF"
+                current_bg = None
+            else:
+                codes = code_str.split(';')
+                for code_item in codes:
+                    if not code_item:
+                        continue
+                    try:
+                        code = int(code_item)
+                        if code == 0:
+                            # 重置所有属性
+                            current_fg = "#FFFFFF"
+                            current_bg = None
+                        elif code == 1:
+                            # 粗体（暂时忽略）
+                            pass
+                        elif code in self.ansi_fg_colors:
+                            # 前景色
+                            current_fg = self.ansi_fg_colors[code]
+                        elif code in self.ansi_bg_colors:
+                            # 背景色
+                            current_bg = self.ansi_bg_colors[code]
+                        elif 30 <= code <= 37:
+                            # 标准前景色
+                            current_fg = self.ansi_fg_colors.get(code, "#FFFFFF")
+                        elif 40 <= code <= 47:
+                            # 标准背景色
+                            current_bg = self.ansi_bg_colors.get(code)
+                    except ValueError:
                         pass
-                    elif code in self.ansi_fg_colors:
-                        # 前景色
-                        current_fg = self.ansi_fg_colors[code]
-                    elif code in self.ansi_bg_colors:
-                        # 背景色
-                        current_bg = self.ansi_bg_colors[code]
-                    elif 30 <= code <= 37:
-                        # 标准前景色
-                        current_fg = self.ansi_fg_colors.get(code, "#FFFFFF")
-                    elif 40 <= code <= 47:
-                        # 标准背景色
-                        current_bg = self.ansi_bg_colors.get(code)
-                except ValueError:
-                    pass
             
             last_pos = match.end()
         
