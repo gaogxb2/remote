@@ -79,19 +79,31 @@ class TCPConnector(DeviceConnector):
             self.socket = None
     
     def send_command(self, command):
+        """发送命令或字符（如果是单个字符，不添加换行符）"""
         if not self.connected or not self.socket:
             return False
         try:
             # 临时设置为阻塞模式以确保数据发送完成
             was_blocking = self.socket.getblocking()
             self.socket.setblocking(True)
-            data = (command + '\n').encode('utf-8')
+            
+            # 如果是单个字符（如实时输入），不添加换行符
+            # 如果是换行符或退格符，直接发送
+            if len(command) == 1 and command in ['\n', '\b', '\r']:
+                data = command.encode('utf-8')
+            elif len(command) == 1:
+                # 单个字符，直接发送
+                data = command.encode('utf-8')
+            else:
+                # 多个字符的命令，添加换行符
+                data = (command + '\n').encode('utf-8')
+            
             self.socket.sendall(data)
             # 恢复原来的阻塞模式
             self.socket.setblocking(was_blocking)
             return True
         except Exception as e:
-            self.output_callback(f"[错误] 发送命令失败: {str(e)}\n")
+            self.output_callback(f"[错误] 发送失败: {str(e)}\n")
             # 尝试恢复阻塞模式
             try:
                 self.socket.setblocking(False)
@@ -210,13 +222,23 @@ class TelnetConnector(DeviceConnector):
             self.socket = None
     
     def send_command(self, command):
+        """发送命令或字符（如果是单个字符，不添加换行符）"""
         if not self.connected or not self.socket:
             return False
         try:
-            self.socket.write((command + '\n').encode('utf-8'))
+            # 如果是单个字符（如实时输入），不添加换行符
+            if len(command) == 1 and command in ['\n', '\b', '\r']:
+                data = command.encode('utf-8')
+            elif len(command) == 1:
+                # 单个字符，直接发送
+                data = command.encode('utf-8')
+            else:
+                # 多个字符的命令，添加换行符
+                data = (command + '\n').encode('utf-8')
+            self.socket.write(data)
             return True
         except Exception as e:
-            self.output_callback(f"[错误] 发送命令失败: {str(e)}\n")
+            self.output_callback(f"[错误] 发送失败: {str(e)}\n")
             return False
     
     def _read_data(self):
@@ -291,14 +313,23 @@ class SerialConnector(DeviceConnector):
             self.socket = None
     
     def send_command(self, command):
+        """发送命令或字符（如果是单个字符，不添加换行符）"""
         if not self.connected or not self.socket:
             return False
         try:
-            data = (command + '\n').encode('utf-8')
+            # 如果是单个字符（如实时输入），不添加换行符
+            if len(command) == 1 and command in ['\n', '\b', '\r']:
+                data = command.encode('utf-8')
+            elif len(command) == 1:
+                # 单个字符，直接发送
+                data = command.encode('utf-8')
+            else:
+                # 多个字符的命令，添加换行符
+                data = (command + '\n').encode('utf-8')
             self.socket.write(data)
             return True
         except Exception as e:
-            self.output_callback(f"[错误] 发送命令失败: {str(e)}\n")
+            self.output_callback(f"[错误] 发送失败: {str(e)}\n")
             return False
     
     def _read_data(self):
@@ -705,7 +736,7 @@ class TabPage:
         # 初始化输入提示符
         self.input_prompt = "> "
         self.input_start_mark = "input_start"
-        self.input_enabled = False  # 只有连接成功后才允许输入
+        self.input_enabled = True  # 永远允许输入
         
         # 绑定键盘事件
         self.output_text.bind("<Key>", self.on_output_key)
@@ -716,10 +747,12 @@ class TabPage:
         self.output_text.bind("<Control-v>", self.on_paste)  # 支持粘贴
         self.output_text.bind("<Command-v>", self.on_paste)  # macOS粘贴
         
-        # 初始化输入区域（但不允许输入，直到连接成功）
+        # 初始化输入区域
         self.output_text.config(state=tk.NORMAL)
-        self.output_text.insert(tk.END, "请先连接设备...\n")
-        self.output_text.config(state=tk.DISABLED)
+        self.output_text.insert(tk.END, self.input_prompt)
+        self.output_text.mark_set(self.input_start_mark, tk.END)
+        self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
+        self.output_text.config(state=tk.NORMAL)
         
         # 输出控制按钮
         output_buttons = ttk.Frame(output_frame)
@@ -932,7 +965,7 @@ class TabPage:
                 self.connect_btn.config(text="断开")
                 self.status_label.config(text="状态: 已连接", foreground="green")
                 self.append_output(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 连接成功\n")
-                # 连接成功后启用输入
+                # 连接成功后确保输入提示符存在
                 self.enable_input()
             else:
                 self.status_label.config(text="状态: 连接失败", foreground="red")
@@ -949,8 +982,8 @@ class TabPage:
         self.connect_btn.config(text="连接")
         self.status_label.config(text="状态: 未连接", foreground="red")
         self.append_output(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 已断开连接\n")
-        # 断开连接后禁用输入
-        self.disable_input()
+        # 断开连接后保持输入功能（但发送会失败）
+        self.enable_input()
     
     def send_command(self, command=None):
         """发送命令"""
@@ -1025,7 +1058,7 @@ class TabPage:
         self.output_text.config(state=tk.NORMAL)
     
     def enable_input(self):
-        """启用输入功能"""
+        """启用输入功能（现在永远启用，此方法保留用于兼容性）"""
         self.input_enabled = True
         self.output_text.config(state=tk.NORMAL)
         # 如果还没有输入提示符，添加一个
@@ -1043,16 +1076,17 @@ class TabPage:
         self.output_text.focus_set()
     
     def disable_input(self):
-        """禁用输入功能"""
-        self.input_enabled = False
-        self.output_text.config(state=tk.DISABLED)
+        """禁用输入功能（现在不再禁用，此方法保留用于兼容性）"""
+        # 不再禁用输入，但确保有输入提示符
+        self.input_enabled = True
+        self.output_text.config(state=tk.NORMAL)
+        try:
+            self.output_text.index(self.input_start_mark)
+        except:
+            self.add_input_prompt()
     
     def on_output_key(self, event):
         """输出框按键事件"""
-        # 如果未连接，不允许输入
-        if not self.input_enabled:
-            return "break"
-        
         # 确保文本框是可编辑的
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
@@ -1064,27 +1098,32 @@ class TabPage:
             if self.output_text.compare(cursor_pos, "<", input_start):
                 # 光标在输入区域之前，移动到输入区域末尾
                 self.output_text.mark_set(tk.INSERT, tk.END)
-                # 对于某些特殊键，允许继续处理
-                if event.keysym in ['Return', 'BackSpace', 'Delete', 'Up', 'Down', 'Left', 'Right']:
-                    return None
-                # 对于普通字符，移动到输入区域后允许输入
-                return None
         except:
-            # 如果没有输入标记，添加一个，但不阻止输入
+            # 如果没有输入标记，添加一个
             try:
                 self.add_input_prompt()
             except:
                 pass
-            # 允许输入继续
+        
+        # 处理普通字符输入（实时发送）
+        if event.char and event.char.isprintable() and len(event.char) == 1:
+            # 如果已连接，实时发送字符
+            if self.connector and self.connector.connected:
+                try:
+                    self.connector.send_command(event.char)
+                except:
+                    pass
+            # 允许正常显示字符
             return None
         
-        # 允许正常输入
+        # 其他特殊键由专门的处理函数处理
         return None
     
     def on_paste(self, event):
         """粘贴事件处理"""
-        if not self.input_enabled:
-            return "break"
+        # 确保文本框是可编辑的
+        if self.output_text.cget("state") == tk.DISABLED:
+            self.output_text.config(state=tk.NORMAL)
         
         # 确保光标在输入区域内
         try:
@@ -1100,9 +1139,9 @@ class TabPage:
     
     def on_output_click(self, event):
         """输出框点击事件"""
-        # 如果未连接，不允许点击编辑
-        if not self.input_enabled:
-            return "break"
+        # 确保文本框是可编辑的
+        if self.output_text.cget("state") == tk.DISABLED:
+            self.output_text.config(state=tk.NORMAL)
         
         # 如果点击在输入区域之前，将光标移动到输入区域末尾
         try:
@@ -1119,47 +1158,24 @@ class TabPage:
     
     def on_output_return(self, event):
         """输出框回车事件"""
-        # 如果未连接，不允许发送命令
-        if not self.input_enabled or not self.connector or not self.connector.connected:
-            messagebox.showwarning("警告", "请先连接设备")
-            return "break"
-        
         # 确保文本框是可编辑的
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
         
-        # 先获取当前输入的命令（在删除之前）
-        command = self.get_input_command()
-        
-        # 移除当前输入提示符和命令
-        try:
-            start_pos = self.output_text.index(self.input_start_mark)
-            end_pos = self.output_text.index(tk.END)
-            self.output_text.delete(start_pos, end_pos)
-        except:
-            # 如果获取位置失败，尝试从最后一行获取
+        # 如果已连接，发送换行符
+        if self.connector and self.connector.connected:
             try:
-                end_pos = self.output_text.index(tk.END)
-                last_line_start = self.output_text.index(f"{end_pos} linestart")
-                self.output_text.delete(last_line_start, end_pos)
+                # 发送换行符（\n）
+                self.connector.send_command('\n')
             except:
                 pass
         
-        # 显示发送的命令
-        if command:
-            self.output_text.insert(tk.END, f"{self.input_prompt}{command}\n")
-        else:
-            self.output_text.insert(tk.END, f"{self.input_prompt}\n")
-        self.output_text.see(tk.END)
+        # 在当前位置插入换行符
+        self.output_text.insert(tk.INSERT, '\n')
         
-        # 发送命令到单板
-        if command and self.connector and self.connector.connected:
-            try:
-                success = self.connector.send_command(command)
-                if not success:
-                    self.append_output(f"[错误] 发送命令失败: {command}\n")
-            except Exception as e:
-                self.append_output(f"[错误] 发送命令异常: {str(e)}\n")
+        # 更新输入提示符位置
+        self.output_text.mark_set(self.input_start_mark, tk.END)
+        self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
         
         # 添加新的输入提示符
         self.add_input_prompt()
@@ -1168,8 +1184,9 @@ class TabPage:
     
     def on_output_backspace(self, event):
         """输出框退格事件"""
-        if not self.input_enabled:
-            return "break"
+        # 确保文本框是可编辑的
+        if self.output_text.cget("state") == tk.DISABLED:
+            self.output_text.config(state=tk.NORMAL)
         
         cursor_pos = self.output_text.index(tk.INSERT)
         try:
@@ -1177,14 +1194,30 @@ class TabPage:
             if self.output_text.compare(cursor_pos, "<=", input_start):
                 # 不允许删除输入提示符
                 return "break"
+            
+            # 如果已连接，发送退格字符
+            if self.connector and self.connector.connected:
+                try:
+                    # 发送退格字符（\b或\x08）
+                    self.connector.send_command('\b')
+                except:
+                    pass
+            
+            # 执行退格删除
+            if self.output_text.compare(cursor_pos, ">", input_start):
+                # 删除光标前一个字符
+                prev_pos = self.output_text.index(f"{cursor_pos} - 1 char")
+                self.output_text.delete(prev_pos, cursor_pos)
         except:
-            return "break"
-        return None
+            pass
+        
+        return "break"
     
     def on_output_delete(self, event):
         """输出框删除事件"""
-        if not self.input_enabled:
-            return "break"
+        # 确保文本框是可编辑的
+        if self.output_text.cget("state") == tk.DISABLED:
+            self.output_text.config(state=tk.NORMAL)
         
         cursor_pos = self.output_text.index(tk.INSERT)
         try:
@@ -1192,9 +1225,17 @@ class TabPage:
             if self.output_text.compare(cursor_pos, "<", input_start):
                 # 不允许删除输入区域之前的内容
                 return "break"
+            
+            # 如果已连接，可以发送删除字符（可选）
+            # 大多数终端不支持删除键，所以这里只做本地删除
+            if self.output_text.compare(cursor_pos, "<", tk.END):
+                # 删除光标位置的字符
+                next_pos = self.output_text.index(f"{cursor_pos} + 1 char")
+                self.output_text.delete(cursor_pos, next_pos)
         except:
-            return "break"
-        return None
+            pass
+        
+        return "break"
     
     def append_output(self, text):
         """添加输出文本（线程安全）"""
@@ -1377,10 +1418,13 @@ class TabPage:
                 self.command_history.pop(0)
         self.history_index = -1
         
-        # 发送命令
+        # 发送命令（会自动添加换行符）
         if self.connector.send_command(command):
             self.append_output(f"[快速发送] {command}\n")
             self.quick_cmd_entry.delete(0, tk.END)
+            # 确保输出显示区域可以继续输入
+            self.output_text.focus_set()
+            self.enable_input()
         else:
             messagebox.showerror("错误", "发送命令失败")
     
