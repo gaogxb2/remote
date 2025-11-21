@@ -538,6 +538,8 @@ class TabPage:
         self.log_enabled = False
         self.log_file = None
         self.log_file_path = None
+        self.raw_log_file = None
+        self.raw_log_file_path = None
         
         # 命令历史
         self.command_history = []
@@ -1318,6 +1320,13 @@ class TabPage:
             except Exception as e:
                 # 日志写入失败，不影响程序运行
                 pass
+        # 写入原始日志（保留原始格式）
+        if self.raw_log_file:
+            try:
+                self.raw_log_file.write(text.encode('utf-8', errors='replace'))
+                self.raw_log_file.flush()
+            except Exception:
+                pass
     
     def check_output_queue(self):
         """检查输出队列并更新显示"""
@@ -1482,8 +1491,15 @@ class TabPage:
             
             # 打开日志文件（追加模式）
             self.log_file = open(self.log_file_path, 'a', encoding='utf-8')
+            
+            # 原始日志文件（保留未处理内容）
+            raw_log_filename = f"{self.tab_name}_{timestamp}_raw.log"
+            self.raw_log_file_path = os.path.join(log_dir, raw_log_filename)
+            self.raw_log_file = open(self.raw_log_file_path, 'ab')
+            
             self.log_enabled = True
             self.append_output(f"[日志] 开始记录日志到: {self.log_file_path}\n")
+            self.append_output(f"[日志] 原始日志记录到: {self.raw_log_file_path}\n")
         except Exception as e:
             messagebox.showerror("错误", f"启动日志记录失败: {str(e)}")
             self.log_checkbox.state(['!selected'])
@@ -1498,6 +1514,13 @@ class TabPage:
             except:
                 pass
             self.log_file = None
+        if self.raw_log_file:
+            try:
+                self.raw_log_file.close()
+                self.append_output(f"[日志] 原始日志已保存到: {self.raw_log_file_path}\n")
+            except:
+                pass
+            self.raw_log_file = None
         self.log_enabled = False
     
     def send_quick_command(self):
