@@ -17,6 +17,7 @@ import sys
 import os
 import paramiko
 from pathlib import Path
+import re
 
 
 class DeviceConnector:
@@ -90,6 +91,7 @@ class TCPConnector(DeviceConnector):
     
     def _read_data(self):
         import select
+        import socket
         while not self.stop_flag and self.connected:
             try:
                 ready, _, _ = select.select([self.socket], [], [], 0.1)
@@ -98,11 +100,30 @@ class TCPConnector(DeviceConnector):
                     if data:
                         self.output_callback(data.decode('utf-8', errors='ignore'))
                     else:
+                        # 连接被关闭
                         break
-            except Exception as e:
+            except socket.timeout:
+                # 超时是正常的，继续等待数据
+                continue
+            except OSError as e:
+                # 连接错误，中断连接
                 if not self.stop_flag:
-                    self.output_callback(f"[错误] 接收数据失败: {str(e)}\n")
+                    self.output_callback(f"[错误] 连接错误: {str(e)}\n")
                 break
+            except Exception as e:
+                # 其他错误，检查是否是连接相关
+                error_str = str(e).lower()
+                if 'timeout' in error_str or 'timed out' in error_str:
+                    # 超时错误，继续等待
+                    continue
+                elif 'broken pipe' in error_str or 'connection' in error_str:
+                    # 连接断开，中断
+                    if not self.stop_flag:
+                        self.output_callback(f"[错误] 连接断开: {str(e)}\n")
+                    break
+                else:
+                    # 其他错误，继续尝试
+                    continue
         self.connected = False
 
 
@@ -141,17 +162,42 @@ class TelnetConnector(DeviceConnector):
             return False
     
     def _read_data(self):
+        import socket
         while not self.stop_flag and self.connected:
             try:
                 data = self.socket.read_some()
                 if data:
                     self.output_callback(data.decode('utf-8', errors='ignore'))
                 else:
+                    # 连接被关闭
                     break
-            except Exception as e:
+            except socket.timeout:
+                # 超时是正常的，继续等待数据
+                continue
+            except EOFError:
+                # 连接结束
                 if not self.stop_flag:
-                    self.output_callback(f"[错误] 接收数据失败: {str(e)}\n")
+                    self.output_callback("[提示] 连接已关闭\n")
                 break
+            except OSError as e:
+                # 连接错误，中断连接
+                if not self.stop_flag:
+                    self.output_callback(f"[错误] 连接错误: {str(e)}\n")
+                break
+            except Exception as e:
+                # 其他错误，检查是否是超时或连接相关
+                error_str = str(e).lower()
+                if 'timeout' in error_str or 'timed out' in error_str:
+                    # 超时错误，继续等待
+                    continue
+                elif 'broken pipe' in error_str or 'connection' in error_str or 'eof' in error_str:
+                    # 连接断开，中断
+                    if not self.stop_flag:
+                        self.output_callback(f"[错误] 连接断开: {str(e)}\n")
+                    break
+                else:
+                    # 其他错误，继续尝试
+                    continue
         self.connected = False
 
 
@@ -198,6 +244,8 @@ class SerialConnector(DeviceConnector):
             return False
     
     def _read_data(self):
+        import time
+        import serial
         while not self.stop_flag and self.connected:
             try:
                 if self.socket.in_waiting > 0:
@@ -205,12 +253,36 @@ class SerialConnector(DeviceConnector):
                     if data:
                         self.output_callback(data.decode('utf-8', errors='ignore'))
                 else:
-                    import time
                     time.sleep(0.1)
-            except Exception as e:
+            except serial.SerialTimeoutException:
+                # 串口超时是正常的，继续等待
+                continue
+            except serial.SerialException as e:
+                # 串口错误，中断连接
                 if not self.stop_flag:
-                    self.output_callback(f"[错误] 接收数据失败: {str(e)}\n")
+                    self.output_callback(f"[错误] 串口错误: {str(e)}\n")
                 break
+            except OSError as e:
+                # 系统错误，检查是否是连接相关
+                error_str = str(e).lower()
+                if 'timeout' in error_str:
+                    # 超时错误，继续等待
+                    continue
+                else:
+                    # 其他系统错误，中断
+                    if not self.stop_flag:
+                        self.output_callback(f"[错误] 系统错误: {str(e)}\n")
+                    break
+            except Exception as e:
+                # 其他错误，检查是否是超时
+                error_str = str(e).lower()
+                if 'timeout' in error_str or 'timed out' in error_str:
+                    # 超时错误，继续等待
+                    continue
+                else:
+                    # 其他错误，继续尝试（串口可能暂时不可用）
+                    time.sleep(0.1)
+                    continue
         self.connected = False
 
 
@@ -375,11 +447,63 @@ class TabPage:
         # 初始化文件图标
         self.init_file_icons()
         
+        # ANSI颜色解析相关
+        self.ansi_pattern = re.compile(r'\033\[([0-9;]+)m')
+        self.current_fg_color = "#FFFFFF"  # 默认白色
+        self.current_bg_color = None  # 默认背景色
+        
         self.setup_ui()
         self.check_output_queue()
         
         # 更新滚动区域
         self.update_scroll_region()
+    
+    def setup_ansi_colors(self):
+        """设置ANSI颜色tag"""
+        # ANSI颜色映射（前景色）
+        ansi_fg_colors = {
+            30: "#000000",  # 黑色
+            31: "#FF0000",  # 红色
+            32: "#00FF00",  # 绿色
+            33: "#FFFF00",  # 黄色
+            34: "#0000FF",  # 蓝色
+            35: "#FF00FF",  # 紫色
+            36: "#00FFFF",  # 青色
+            37: "#FFFFFF",  # 白色
+            90: "#808080",  # 亮黑（灰色）
+            91: "#FF8080",  # 亮红
+            92: "#80FF80",  # 亮绿
+            93: "#FFFF80",  # 亮黄
+            94: "#8080FF",  # 亮蓝
+            95: "#FF80FF",  # 亮紫
+            96: "#80FFFF",  # 亮青
+            97: "#FFFFFF",  # 亮白
+        }
+        
+        # ANSI颜色映射（背景色）
+        ansi_bg_colors = {
+            40: "#000000",  # 黑色
+            41: "#FF0000",  # 红色
+            42: "#00FF00",  # 绿色
+            43: "#FFFF00",  # 黄色
+            44: "#0000FF",  # 蓝色
+            45: "#FF00FF",  # 紫色
+            46: "#00FFFF",  # 青色
+            47: "#FFFFFF",  # 白色
+        }
+        
+        # 创建颜色tag
+        for code, color in ansi_fg_colors.items():
+            tag_name = f"ansi_fg_{code}"
+            self.output_text.tag_config(tag_name, foreground=color)
+        
+        for code, color in ansi_bg_colors.items():
+            tag_name = f"ansi_bg_{code}"
+            self.output_text.tag_config(tag_name, background=color)
+        
+        # 保存颜色映射供后续使用
+        self.ansi_fg_colors = ansi_fg_colors
+        self.ansi_bg_colors = ansi_bg_colors
     
     def init_file_icons(self):
         """初始化文件图标"""
@@ -507,6 +631,10 @@ class TabPage:
             selectbackground="#4169E1",  # 选中文本背景色（浅蓝色）
             selectforeground="#FFFFFF"  # 选中文本前景色（白色）
         )
+        
+        # 配置ANSI颜色tag
+        self.setup_ansi_colors()
+        
         # 初始化输入提示符
         self.input_prompt = "> "
         self.input_start_mark = "input_start"
@@ -726,24 +854,16 @@ class TabPage:
         """发送命令"""
         if not self.connector or not self.connector.connected:
             messagebox.showwarning("警告", "请先连接设备")
-            return
+            return False
         
         # 如果没有提供命令，从输入区域获取
         if command is None:
             command = self.get_input_command()
             if not command:
-                return
+                return False
         
-        if self.connector.send_command(command):
-            # 在输入区域后添加发送的命令显示
-            self.output_text.config(state=tk.NORMAL)
-            self.output_text.insert(tk.END, f"{command}\n")
-            self.output_text.see(tk.END)
-            self.output_text.config(state=tk.NORMAL)
-            # 重新添加输入提示符
-            self.add_input_prompt()
-        else:
-            messagebox.showerror("错误", "发送命令失败")
+        # 发送命令到单板
+        return self.connector.send_command(command)
     
     def get_input_command(self):
         """获取输入区域的命令（从输入提示符到文本末尾的所有内容）"""
@@ -753,12 +873,24 @@ class TabPage:
             # 获取从输入提示符到末尾的所有文本
             full_text = self.output_text.get(start_pos, end_pos)
             # 移除提示符和换行符，获取实际命令
-            command = full_text.replace(self.input_prompt, "", 1).strip()
+            if full_text.startswith(self.input_prompt):
+                command = full_text[len(self.input_prompt):].strip()
+            else:
+                command = full_text.strip()
             # 移除末尾的换行符（如果有）
             command = command.rstrip('\n\r')
             return command
-        except:
-            return ""
+        except Exception as e:
+            # 如果获取失败，尝试从最后一行获取
+            try:
+                end_pos = self.output_text.index(tk.END)
+                last_line_start = self.output_text.index(f"{end_pos} linestart")
+                last_line = self.output_text.get(last_line_start, end_pos)
+                if last_line.startswith(self.input_prompt):
+                    return last_line[len(self.input_prompt):].strip()
+                return last_line.strip()
+            except:
+                return ""
     
     def add_input_prompt(self):
         """添加输入提示符"""
@@ -826,14 +958,16 @@ class TabPage:
                 # 对于某些特殊键，允许继续处理
                 if event.keysym in ['Return', 'BackSpace', 'Delete', 'Up', 'Down', 'Left', 'Right']:
                     return None
-                return "break"
-        except:
-            # 如果没有输入标记，添加一个
-            self.add_input_prompt()
-            # 对于某些特殊键，允许继续处理
-            if event.keysym in ['Return', 'BackSpace', 'Delete', 'Up', 'Down', 'Left', 'Right']:
+                # 对于普通字符，移动到输入区域后允许输入
                 return None
-            return "break"
+        except:
+            # 如果没有输入标记，添加一个，但不阻止输入
+            try:
+                self.add_input_prompt()
+            except:
+                pass
+            # 允许输入继续
+            return None
         
         # 允许正常输入
         return None
@@ -894,15 +1028,23 @@ class TabPage:
                 start_pos = self.output_text.index(self.input_start_mark)
                 end_pos = self.output_text.index(tk.END)
                 self.output_text.delete(start_pos, end_pos)
-                # 显示发送的命令
-                self.output_text.insert(tk.END, f"{self.input_prompt}{command}\n")
-                self.output_text.see(tk.END)
-                # 发送命令
-                self.send_command(command)
             except:
-                # 如果出错，至少显示命令
-                self.output_text.insert(tk.END, f"{self.input_prompt}{command}\n")
-                self.send_command(command)
+                # 如果获取位置失败，尝试从最后一行获取
+                try:
+                    end_pos = self.output_text.index(tk.END)
+                    last_line_start = self.output_text.index(f"{end_pos} linestart")
+                    self.output_text.delete(last_line_start, end_pos)
+                except:
+                    pass
+            
+            # 显示发送的命令
+            self.output_text.insert(tk.END, f"{self.input_prompt}{command}\n")
+            self.output_text.see(tk.END)
+            
+            # 发送命令到单板
+            if self.connector and self.connector.connected:
+                if not self.connector.send_command(command):
+                    messagebox.showerror("错误", "发送命令失败")
             
             # 添加新的输入提示符
             self.add_input_prompt()
@@ -955,7 +1097,8 @@ class TabPage:
                 self.output_text.config(state=tk.NORMAL)
                 # 在输入提示符之前插入输出内容
                 input_start = self.output_text.index(self.input_start_mark)
-                self.output_text.insert(input_start, text)
+                # 处理ANSI颜色编码
+                self.insert_ansi_text(input_start, text)
                 # 更新输入提示符位置
                 self.output_text.mark_set(self.input_start_mark, tk.END)
                 self.output_text.see(tk.END)
@@ -964,6 +1107,81 @@ class TabPage:
             pass
         
         self.root.after(100, self.check_output_queue)
+    
+    def insert_ansi_text(self, start_pos, text):
+        """插入带ANSI颜色编码的文本"""
+        # 重置当前颜色
+        current_fg = "#FFFFFF"
+        current_bg = None
+        
+        # 查找所有ANSI转义序列
+        last_pos = 0
+        insert_pos = start_pos
+        tag_counter = 0  # 用于创建唯一的tag名称
+        
+        for match in self.ansi_pattern.finditer(text):
+            # 插入ANSI序列之前的文本
+            if match.start() > last_pos:
+                plain_text = text[last_pos:match.start()]
+                if plain_text:
+                    self.output_text.insert(insert_pos, plain_text)
+                    # 应用当前颜色
+                    if current_fg != "#FFFFFF" or current_bg:
+                        end_pos = self.output_text.index(f"{insert_pos} + {len(plain_text)} chars")
+                        tag_name = f"ansi_seg_{tag_counter}"
+                        tag_counter += 1
+                        self.output_text.tag_add(tag_name, insert_pos, end_pos)
+                        if current_fg != "#FFFFFF":
+                            self.output_text.tag_config(tag_name, foreground=current_fg)
+                        if current_bg:
+                            self.output_text.tag_config(tag_name, background=current_bg)
+                    insert_pos = self.output_text.index(tk.END)
+            
+            # 解析ANSI代码
+            codes = match.group(1).split(';')
+            for code_str in codes:
+                if not code_str:
+                    continue
+                try:
+                    code = int(code_str)
+                    if code == 0:
+                        # 重置所有属性
+                        current_fg = "#FFFFFF"
+                        current_bg = None
+                    elif code == 1:
+                        # 粗体（暂时忽略）
+                        pass
+                    elif code in self.ansi_fg_colors:
+                        # 前景色
+                        current_fg = self.ansi_fg_colors[code]
+                    elif code in self.ansi_bg_colors:
+                        # 背景色
+                        current_bg = self.ansi_bg_colors[code]
+                    elif 30 <= code <= 37:
+                        # 标准前景色
+                        current_fg = self.ansi_fg_colors.get(code, "#FFFFFF")
+                    elif 40 <= code <= 47:
+                        # 标准背景色
+                        current_bg = self.ansi_bg_colors.get(code)
+                except ValueError:
+                    pass
+            
+            last_pos = match.end()
+        
+        # 插入剩余的文本
+        if last_pos < len(text):
+            plain_text = text[last_pos:]
+            if plain_text:
+                self.output_text.insert(insert_pos, plain_text)
+                # 应用当前颜色
+                if current_fg != "#FFFFFF" or current_bg:
+                    end_pos = self.output_text.index(f"{insert_pos} + {len(plain_text)} chars")
+                    tag_name = f"ansi_seg_{tag_counter}"
+                    self.output_text.tag_add(tag_name, insert_pos, end_pos)
+                    if current_fg != "#FFFFFF":
+                        self.output_text.tag_config(tag_name, foreground=current_fg)
+                    if current_bg:
+                        self.output_text.tag_config(tag_name, background=current_bg)
     
     def clear_output(self):
         """清空输出"""
