@@ -763,9 +763,23 @@ class TabPage:
     def add_input_prompt(self):
         """添加输入提示符"""
         self.output_text.config(state=tk.NORMAL)
-        self.output_text.insert(tk.END, self.input_prompt)
+        # 检查是否已经有提示符，避免重复添加
+        try:
+            end_pos = self.output_text.index(tk.END)
+            if end_pos != "1.0":
+                # 获取最后一行内容
+                last_line_start = self.output_text.index(f"{end_pos} linestart")
+                last_line = self.output_text.get(last_line_start, end_pos)
+                if not last_line.rstrip().endswith(self.input_prompt.rstrip()):
+                    self.output_text.insert(tk.END, self.input_prompt)
+        except:
+            self.output_text.insert(tk.END, self.input_prompt)
+        
+        # 设置输入区域标记
         self.output_text.mark_set(self.input_start_mark, tk.END)
         self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
+        # 将光标移动到输入区域
+        self.output_text.mark_set(tk.INSERT, tk.END)
         self.output_text.see(tk.END)
         self.output_text.config(state=tk.NORMAL)
     
@@ -775,10 +789,17 @@ class TabPage:
         self.output_text.config(state=tk.NORMAL)
         # 如果还没有输入提示符，添加一个
         try:
+            # 检查标记是否存在
             self.output_text.index(self.input_start_mark)
+            # 标记存在，确保光标在输入区域
+            self.output_text.mark_set(tk.INSERT, tk.END)
         except:
+            # 标记不存在，添加输入提示符
             self.add_input_prompt()
+        # 确保文本框是可编辑的
         self.output_text.config(state=tk.NORMAL)
+        # 将焦点设置到输出文本框
+        self.output_text.focus_set()
     
     def disable_input(self):
         """禁用输入功能"""
@@ -791,17 +812,27 @@ class TabPage:
         if not self.input_enabled:
             return "break"
         
+        # 确保文本框是可编辑的
+        if self.output_text.cget("state") == tk.DISABLED:
+            self.output_text.config(state=tk.NORMAL)
+        
         # 检查光标位置是否在输入区域内
-        cursor_pos = self.output_text.index(tk.INSERT)
         try:
+            cursor_pos = self.output_text.index(tk.INSERT)
             input_start = self.output_text.index(self.input_start_mark)
             if self.output_text.compare(cursor_pos, "<", input_start):
                 # 光标在输入区域之前，移动到输入区域末尾
                 self.output_text.mark_set(tk.INSERT, tk.END)
+                # 对于某些特殊键，允许继续处理
+                if event.keysym in ['Return', 'BackSpace', 'Delete', 'Up', 'Down', 'Left', 'Right']:
+                    return None
                 return "break"
         except:
             # 如果没有输入标记，添加一个
             self.add_input_prompt()
+            # 对于某些特殊键，允许继续处理
+            if event.keysym in ['Return', 'BackSpace', 'Delete', 'Up', 'Down', 'Left', 'Right']:
+                return None
             return "break"
         
         # 允许正常输入
@@ -850,26 +881,33 @@ class TabPage:
             messagebox.showwarning("警告", "请先连接设备")
             return "break"
         
+        # 确保文本框是可编辑的
+        if self.output_text.cget("state") == tk.DISABLED:
+            self.output_text.config(state=tk.NORMAL)
+        
         # 获取当前输入的命令（从输入提示符到文本末尾的所有内容）
         command = self.get_input_command()
         
         if command:
             # 移除当前输入提示符和命令
-            start_pos = self.output_text.index(self.input_start_mark)
-            end_pos = self.output_text.index(tk.END)
-            self.output_text.config(state=tk.NORMAL)
-            self.output_text.delete(start_pos, end_pos)
-            # 显示发送的命令
-            self.output_text.insert(tk.END, f"{self.input_prompt}{command}\n")
-            self.output_text.see(tk.END)
-            self.output_text.config(state=tk.NORMAL)
-            # 发送命令
-            self.send_command(command)
+            try:
+                start_pos = self.output_text.index(self.input_start_mark)
+                end_pos = self.output_text.index(tk.END)
+                self.output_text.delete(start_pos, end_pos)
+                # 显示发送的命令
+                self.output_text.insert(tk.END, f"{self.input_prompt}{command}\n")
+                self.output_text.see(tk.END)
+                # 发送命令
+                self.send_command(command)
+            except:
+                # 如果出错，至少显示命令
+                self.output_text.insert(tk.END, f"{self.input_prompt}{command}\n")
+                self.send_command(command)
+            
             # 添加新的输入提示符
             self.add_input_prompt()
         else:
             # 即使没有命令，也添加新行和提示符
-            self.output_text.config(state=tk.NORMAL)
             self.output_text.insert(tk.END, "\n")
             self.add_input_prompt()
         
