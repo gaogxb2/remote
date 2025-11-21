@@ -554,7 +554,7 @@ class TabPage:
         self.init_file_icons()
         
         # ANSI颜色解析相关
-        self.ansi_pattern = re.compile(r'\033\[([0-9;]*)m')
+        self.ansi_pattern = re.compile(r'\033(?:\033\[|\[)([0-9;]*)m')
         self.current_fg_color = "#FFFFFF"  # 默认白色
         self.current_bg_color = None  # 默认背景色
         
@@ -916,6 +916,9 @@ class TabPage:
         
         # 更新滚动区域
         self.update_scroll_region()
+        
+        # ANSI tag计数器（确保tag名称全局唯一）
+        self.ansi_tag_counter = 0
     
     def on_conn_type_changed(self, event=None):
         """连接方式改变时的处理"""
@@ -1324,8 +1327,11 @@ class TabPage:
                 self.output_text.config(state=tk.NORMAL)
                 # 在输入提示符之前插入输出内容
                 input_start = self.output_text.index(self.input_start_mark)
-                # 处理ANSI颜色编码
-                self.insert_ansi_text(input_start, text)
+                # 先处理控制字符（如BS、DEL）并获取清理后的文本
+                text, input_start = self.process_control_chars(input_start, text)
+                if text:
+                    # 处理ANSI颜色编码
+                    self.insert_ansi_text(input_start, text)
                 # 更新输入提示符位置
                 self.output_text.mark_set(self.input_start_mark, tk.END)
                 self.output_text.see(tk.END)
@@ -1334,6 +1340,34 @@ class TabPage:
             pass
         
         self.root.after(100, self.check_output_queue)
+    
+    def process_control_chars(self, insert_pos, text):
+        """处理控制字符（如BS、DEL）"""
+        cleaned_chars = []
+        current_pos = insert_pos
+        i = 0
+        length = len(text)
+        
+        while i < length:
+            ch = text[i]
+            if ch in ('\x08', '\b', '\x7f'):  # 处理Backspace/DEL
+                if cleaned_chars:
+                    cleaned_chars.pop()
+                else:
+                    try:
+                        prev_pos = self.output_text.index(f"{current_pos} - 1 chars")
+                        if self.output_text.compare(prev_pos, ">=", "1.0"):
+                            self.output_text.delete(prev_pos, current_pos)
+                            current_pos = prev_pos
+                    except Exception:
+                        pass
+                i += 1
+                continue
+            cleaned_chars.append(ch)
+            i += 1
+        
+        cleaned_text = ''.join(cleaned_chars)
+        return cleaned_text, current_pos
     
     def insert_ansi_text(self, start_pos, text):
         """插入带ANSI颜色编码的文本"""
@@ -1344,7 +1378,6 @@ class TabPage:
         # 查找所有ANSI转义序列
         last_pos = 0
         insert_pos = start_pos
-        tag_counter = 0  # 用于创建唯一的tag名称
         
         for match in self.ansi_pattern.finditer(text):
             # 插入ANSI序列之前的文本
@@ -1355,8 +1388,8 @@ class TabPage:
                     # 应用当前颜色
                     if current_fg != "#FFFFFF" or current_bg:
                         end_pos = self.output_text.index(f"{insert_pos} + {len(plain_text)} chars")
-                        tag_name = f"ansi_seg_{tag_counter}"
-                        tag_counter += 1
+                        tag_name = f"ansi_seg_{self.ansi_tag_counter}"
+                        self.ansi_tag_counter += 1
                         self.output_text.tag_add(tag_name, insert_pos, end_pos)
                         if current_fg != "#FFFFFF":
                             self.output_text.tag_config(tag_name, foreground=current_fg)
@@ -1409,7 +1442,8 @@ class TabPage:
                 # 应用当前颜色
                 if current_fg != "#FFFFFF" or current_bg:
                     end_pos = self.output_text.index(f"{insert_pos} + {len(plain_text)} chars")
-                    tag_name = f"ansi_seg_{tag_counter}"
+                    tag_name = f"ansi_seg_{self.ansi_tag_counter}"
+                    self.ansi_tag_counter += 1
                     self.output_text.tag_add(tag_name, insert_pos, end_pos)
                     if current_fg != "#FFFFFF":
                         self.output_text.tag_config(tag_name, foreground=current_fg)
