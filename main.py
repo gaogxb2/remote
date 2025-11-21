@@ -18,14 +18,64 @@ import os
 import paramiko
 from pathlib import Path
 import re
+import time
+_current_send_handler = None
+_current_receive_handler = None
+text = None  # 全局捕获结果
+_capture_lock = threading.Lock()
+
+
+def register_send_handler(handler):
+    """注册全局发送函数的处理器"""
+    global _current_send_handler
+    _current_send_handler = handler
+
+
+def send(command):
+    """全局发送函数：send("ls")"""
+    if not isinstance(command, str):
+        raise TypeError("send() 只接受字符串参数")
+    if not _current_send_handler:
+        raise RuntimeError("当前没有可用的连接，请先选择一个已连接的标签页。")
+    return _current_send_handler(command)
+
+
+def register_receive_handler(handler):
+    """注册全局回显捕获处理器"""
+    global _current_receive_handler
+    _current_receive_handler = handler
+
+
+def start_receive():
+    """开始捕获单板回显"""
+    global text
+    with _capture_lock:
+        text = ""
+    register_receive_handler(_default_receive_handler)
+
+
+def stop_receive():
+    """结束捕获单板回显"""
+    global text
+    register_receive_handler(None)
+    return text
+
+
+def _default_receive_handler(chunk):
+    """默认的回显捕获处理"""
+    global text
+    with _capture_lock:
+        if text is not None:
+            text += chunk
 import json
 
 
 class DeviceConnector:
     """设备连接器基类"""
     
-    def __init__(self, output_callback):
+    def __init__(self, output_callback, raw_callback=None):
         self.output_callback = output_callback
+        self.raw_callback = raw_callback
         self.connected = False
         self.socket = None
         self.read_thread = None
@@ -49,6 +99,14 @@ class DeviceConnector:
     def _read_data(self):
         """读取数据（在子线程中运行）"""
         raise NotImplementedError
+    
+    def log_raw_data(self, data):
+        """记录原始数据"""
+        if self.raw_callback and data:
+            try:
+                self.raw_callback(data)
+            except Exception:
+                pass
 
 
 class TCPConnector(DeviceConnector):
@@ -126,6 +184,7 @@ class TCPConnector(DeviceConnector):
                     try:
                         data = self.socket.recv(4096)
                         if data:
+                            self.log_raw_data(data)
                             self.output_callback(data.decode('utf-8', errors='ignore'))
                         else:
                             # 连接被关闭
@@ -169,6 +228,7 @@ class TCPConnector(DeviceConnector):
                     if ready:
                         data = self.socket.recv(4096)
                         if data:
+                            self.log_raw_data(data)
                             self.output_callback(data.decode('utf-8', errors='ignore'))
                         else:
                             # 连接被关闭
@@ -248,6 +308,7 @@ class TelnetConnector(DeviceConnector):
             try:
                 data = self.socket.read_some()
                 if data:
+                    self.log_raw_data(data)
                     self.output_callback(data.decode('utf-8', errors='ignore'))
                 else:
                     # 连接被关闭
@@ -341,6 +402,7 @@ class SerialConnector(DeviceConnector):
                 if self.socket.in_waiting > 0:
                     data = self.socket.read(self.socket.in_waiting)
                     if data:
+                        self.log_raw_data(data)
                         self.output_callback(data.decode('utf-8', errors='ignore'))
                 else:
                     time.sleep(0.1)
@@ -545,11 +607,20 @@ class TabPage:
         self.command_history = []
         self.history_index = -1
         
+        # 智能命令模板
+        self.smart_templates = {
+            "系统信息检查": "uname -a\nuptime\nwho\nfree -h\nvmstat 1 5",
+            "网络诊断": "ifconfig -a\nnetstat -rn\nping -c 4 8.8.8.8\ntraceroute 8.8.8.8",
+            "日志采集": "dmesg | tail -n 50\njournalctl -xe --no-pager\ntail -n 100 /var/log/syslog"
+        }
+        self.current_template_name = ""
+        
         # 配置信息
         self.config = {
             "connection": {},
             "commands": [],
-            "sftp": {}
+            "sftp": {},
+            "smart_templates": self.smart_templates.copy()
         }
         
         # 初始化文件图标
@@ -673,8 +744,14 @@ class TabPage:
     def setup_ui(self):
         """设置用户界面"""
         # 连接方式选择
+        self.frame.columnconfigure(0, weight=3)
+        self.frame.columnconfigure(1, weight=2)
+        for i in range(4):
+            self.frame.rowconfigure(i, weight=0)
+        self.frame.rowconfigure(3, weight=1)
+        
         conn_frame = ttk.LabelFrame(self.frame, text="连接设置", padding="10")
-        conn_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        conn_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         conn_frame.columnconfigure(1, weight=1)
         
         ttk.Label(conn_frame, text="连接方式:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
@@ -725,7 +802,7 @@ class TabPage:
         
         # 输出显示区域
         output_frame = ttk.LabelFrame(self.frame, text="输出显示", padding="10")
-        output_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        output_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         output_frame.columnconfigure(0, weight=1)
         output_frame.rowconfigure(0, weight=1)
         
@@ -781,7 +858,7 @@ class TabPage:
         
         # 命令发送区域
         cmd_send_frame = ttk.LabelFrame(self.frame, text="快速命令发送", padding="10")
-        cmd_send_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        cmd_send_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         cmd_send_frame.columnconfigure(0, weight=1)
         
         cmd_input_frame = ttk.Frame(cmd_send_frame)
@@ -809,10 +886,57 @@ class TabPage:
         
         # SFTP文件传输区域
         sftp_frame = ttk.LabelFrame(self.frame, text="SFTP文件传输", padding="10")
-        sftp_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        sftp_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         sftp_frame.columnconfigure(0, weight=1)
         sftp_frame.columnconfigure(1, weight=1)
         sftp_frame.rowconfigure(1, weight=1)
+        
+        # 智能命令编辑区域（右侧列）
+        smart_frame = ttk.LabelFrame(self.frame, text="智能命令编辑", padding="10")
+        smart_frame.grid(row=0, column=1, rowspan=4, sticky=(tk.N, tk.S, tk.E, tk.W), padx=(10, 0))
+        smart_frame.columnconfigure(0, weight=1)
+        smart_frame.rowconfigure(2, weight=1)
+
+        header_frame = ttk.Frame(smart_frame)
+        header_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        ttk.Label(header_frame, text="说明：可以编辑命令或Python脚本，点击下方按钮执行。").pack(side=tk.LEFT)
+        ttk.Button(header_frame, text="帮助", command=self.show_smart_help).pack(side=tk.RIGHT)
+
+        title_frame = ttk.Frame(smart_frame)
+        title_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        ttk.Label(title_frame, text="模板标题:").pack(side=tk.LEFT)
+        self.smart_title_entry = ttk.Entry(title_frame)
+        self.smart_title_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        
+        combo_frame = ttk.Frame(smart_frame)
+        combo_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=5)
+        self.smart_template_combo = ttk.Combobox(
+            combo_frame,
+            state="readonly")
+        self.smart_template_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.smart_template_combo.bind("<<ComboboxSelected>>", self.apply_smart_template)
+        ttk.Button(combo_frame, text="保存模板", command=self.save_smart_template).pack(side=tk.LEFT, padx=5)
+
+        self.smart_text = scrolledtext.ScrolledText(smart_frame, height=15, wrap=tk.WORD)
+        self.smart_text.grid(row=3, column=0, sticky=(tk.N, tk.S, tk.E, tk.W), pady=5)
+        self.smart_text.bind("<Tab>", self.smart_text_tab)
+
+        smart_btn_frame = ttk.Frame(smart_frame)
+        smart_btn_frame.grid(row=4, column=0, sticky=tk.EW, pady=(5, 0))
+        ttk.Button(smart_btn_frame, text="发送智能命令", command=self.send_smart_command).pack(
+            side=tk.LEFT, padx=5)
+        ttk.Button(smart_btn_frame, text="以Python执行", command=self.run_smart_python).pack(
+            side=tk.LEFT, padx=5)
+        ttk.Button(smart_btn_frame, text="清空", command=lambda: self.smart_text.delete("1.0", tk.END)).pack(
+            side=tk.LEFT, padx=5)
+        
+        self.refresh_smart_templates()
+        
+        # 智能脚本回显
+        echo_frame = ttk.LabelFrame(smart_frame, text="脚本输出", padding="5")
+        echo_frame.grid(row=5, column=0, sticky=(tk.W, tk.E, tk.N))
+        self.smart_output = scrolledtext.ScrolledText(echo_frame, height=6, wrap=tk.WORD, state=tk.DISABLED)
+        self.smart_output.pack(fill=tk.BOTH, expand=True)
         
         # SFTP连接设置
         sftp_conn_frame = ttk.Frame(sftp_frame)
@@ -961,7 +1085,7 @@ class TabPage:
                 if not host or not port:
                     messagebox.showerror("错误", "请输入主机地址和端口")
                     return
-                self.connector = TCPConnector(self.append_output)
+                self.connector = TCPConnector(self.append_output, self.write_raw_log)
                 success = self.connector.connect(host=host, port=port)
                 
             elif conn_type == "Telnet":
@@ -970,7 +1094,7 @@ class TabPage:
                 if not host or not port:
                     messagebox.showerror("错误", "请输入主机地址和端口")
                     return
-                self.connector = TelnetConnector(self.append_output)
+                self.connector = TelnetConnector(self.append_output, self.write_raw_log)
                 success = self.connector.connect(host=host, port=port)
                 
             elif conn_type == "串口":
@@ -979,7 +1103,7 @@ class TabPage:
                 if not port:
                     messagebox.showerror("错误", "请选择串口")
                     return
-                self.connector = SerialConnector(self.append_output)
+                self.connector = SerialConnector(self.append_output, self.write_raw_log)
                 success = self.connector.connect(port=port, baudrate=baudrate)
                 # 串口连接也保存配置（port作为host，baudrate作为port）
                 if success:
@@ -1026,6 +1150,7 @@ class TabPage:
         
         # 发送命令到单板
         return self.connector.send_command(command)
+    
     
     def get_input_command(self):
         """获取输入区域的命令（从输入提示符到文本末尾的所有内容）"""
@@ -1320,13 +1445,6 @@ class TabPage:
             except Exception as e:
                 # 日志写入失败，不影响程序运行
                 pass
-        # 写入原始日志（保留原始格式）
-        if self.raw_log_file:
-            try:
-                self.raw_log_file.write(text.encode('utf-8', errors='replace'))
-                self.raw_log_file.flush()
-            except Exception:
-                pass
     
     def check_output_queue(self):
         """检查输出队列并更新显示"""
@@ -1334,6 +1452,8 @@ class TabPage:
             while True:
                 text = self.output_queue.get_nowait()
                 self.output_text.config(state=tk.NORMAL)
+                if _current_receive_handler:
+                    _current_receive_handler(text)
                 # 在输入提示符之前插入输出内容
                 input_start = self.output_text.index(self.input_start_mark)
                 # 先处理控制字符（如BS、DEL）并获取清理后的文本
@@ -1523,6 +1643,15 @@ class TabPage:
             self.raw_log_file = None
         self.log_enabled = False
     
+    def write_raw_log(self, data):
+        """写入原始日志"""
+        if self.raw_log_file and data:
+            try:
+                self.raw_log_file.write(data)
+                self.raw_log_file.flush()
+            except Exception:
+                pass
+    
     def send_quick_command(self):
         """发送快速命令"""
         command = self.quick_cmd_entry.get().strip()
@@ -1587,6 +1716,137 @@ class TabPage:
             self.quick_cmd_entry.delete(0, tk.END)
         
         return "break"
+    
+    def refresh_smart_templates(self, select_title=""):
+        titles = [""] + list(self.smart_templates.keys())
+        self.smart_template_combo['values'] = titles
+        if select_title:
+            self.smart_template_combo.set(select_title)
+        else:
+            self.smart_template_combo.set("")
+        self.smart_title_entry.delete(0, tk.END)
+        if select_title:
+            self.smart_title_entry.insert(0, select_title)
+            self.smart_text.delete("1.0", tk.END)
+            self.smart_text.insert(tk.END, self.smart_templates.get(select_title, ""))
+    
+    def apply_smart_template(self, event=None):
+        """应用智能命令模板"""
+        template_name = self.smart_template_combo.get()
+        content = self.smart_templates.get(template_name, "")
+        if content:
+            self.current_template_name = template_name
+            self.smart_title_entry.delete(0, tk.END)
+            self.smart_title_entry.insert(0, template_name)
+            self.smart_text.delete("1.0", tk.END)
+            self.smart_text.insert(tk.END, content)
+    
+    def save_smart_template(self):
+        """保存或更新当前智能命令模板"""
+        title = self.smart_title_entry.get().strip()
+        if not title:
+            messagebox.showwarning("警告", "请先输入模板标题")
+            return
+        content = self.smart_text.get("1.0", tk.END).strip()
+        if not content:
+            messagebox.showwarning("警告", "模板内容为空，无法保存")
+            return
+        
+        # 如果重命名，删除旧模板
+        if self.current_template_name and self.current_template_name != title:
+            self.smart_templates.pop(self.current_template_name, None)
+        
+        self.smart_templates[title] = content
+        self.current_template_name = title
+        self.refresh_smart_templates(select_title=title)
+        self.save_smart_templates()
+        messagebox.showinfo("提示", f"模板“{title}”已保存")
+    
+    def send_smart_command(self):
+        """发送智能命令编辑区的命令"""
+        if not self.connector or not self.connector.connected:
+            messagebox.showwarning("警告", "请先连接设备")
+            return
+        
+        content = self.smart_text.get("1.0", tk.END).strip()
+        if not content:
+            messagebox.showinfo("提示", "请先输入需要发送的命令")
+            return
+        
+        commands = [line.strip() for line in content.splitlines() if line.strip()]
+        if not commands:
+            messagebox.showinfo("提示", "没有可发送的命令")
+            return
+        
+        sent = 0
+        for cmd in commands:
+            if self.connector.send_command(cmd):
+                self.append_output(f"[智能命令] {cmd}\n")
+                sent += 1
+            else:
+                self.append_output(f"[错误] 智能命令发送失败: {cmd}\n")
+                break
+        self.smart_text.focus_set()
+        messagebox.showinfo("提示", f"智能命令发送完成，共发送 {sent} 条。")
+    
+    def smart_print(self, message):
+        """打印到智能脚本输出框"""
+        self.smart_output.config(state=tk.NORMAL)
+        self.smart_output.insert(tk.END, message + "\n")
+        self.smart_output.see(tk.END)
+        self.smart_output.config(state=tk.DISABLED)
+    
+    def smart_text_tab(self, event):
+        """智能命令编辑区的Tab缩进"""
+        self.smart_text.insert(tk.INSERT, "    ")
+        return "break"
+    
+    def show_smart_help(self):
+        """显示智能命令功能帮助"""
+        help_text = (
+            "智能命令编辑支持以下内置函数：\n"
+            "• send(cmd): 发送字符串命令到当前连接\n"
+            "• start_receive(): 开始捕获单板回显\n"
+            "• stop_receive(): 结束捕获并返回文本\n"
+            "• print(...): 将信息输出到脚本输出窗口\n"
+            "• wait(seconds): 等同于 time.sleep，用于延时\n\n"
+            "可以编写多行 Python 代码，例如循环发送命令、等待回显等。"
+        )
+        messagebox.showinfo("智能命令帮助", help_text)
+    
+    def run_smart_python(self):
+        """以Python脚本执行智能命令"""
+        code = self.smart_text.get("1.0", tk.END).strip()
+        if not code:
+            messagebox.showinfo("提示", "请先输入需要执行的Python代码")
+            return
+        
+        def worker():
+            local_context = {
+                "send": send,
+                "start_receive": start_receive,
+                "stop_receive": stop_receive,
+                "wait": time.sleep,
+                "sleep": time.sleep
+            }
+            try:
+                def _print(*args, **kwargs):
+                    msg = " ".join(str(arg) for arg in args)
+                    self.smart_print(msg)
+                local_context["print"] = _print
+                exec(code, {"__builtins__": __builtins__}, local_context)
+                self.smart_print("[脚本] 执行完成")
+            except Exception as e:
+                self.smart_print(f"[错误] {e}")
+        
+        threading.Thread(target=worker, daemon=True).start()
+    
+    def save_smart_templates(self):
+        """保存智能模板到配置"""
+        self.config["smart_templates"] = self.smart_templates.copy()
+        root = self.root.winfo_toplevel()
+        if hasattr(root, "save_config"):
+            root.save_config()
     
     def toggle_sftp_connection(self):
         """切换SFTP连接状态"""
@@ -2008,6 +2268,12 @@ class TabPage:
         if "commands" in config:
             self.command_history = config["commands"].copy()
         
+        # 恢复智能模板
+        if "smart_templates" in config:
+            self.smart_templates = config["smart_templates"].copy()
+            self.config["smart_templates"] = self.smart_templates.copy()
+            self.refresh_smart_templates()
+        
         # 恢复SFTP配置
         if "sftp" in config:
             sftp_config = config["sftp"]
@@ -2168,6 +2434,7 @@ class DeviceConnectionApp:
         
         # 切换到新标签页
         self.notebook.select(tab_frame)
+        self.set_active_tab(tab_name)
         
         # 重新添加"+"标签页到末尾
         self.add_plus_tab()
@@ -2263,6 +2530,14 @@ class DeviceConnectionApp:
         if tab_name == "+":
             # 延迟执行，避免在事件处理中修改Notebook
             self.root.after(10, self.add_tab)
+        else:
+            self.set_active_tab(tab_name)
+    
+    def set_active_tab(self, tab_name):
+        """设置当前活动标签页供 send() 使用"""
+        tab_page = self.tabs.get(tab_name)
+        if tab_page:
+            register_send_handler(tab_page.send_command)
     
     def on_closing(self):
         """窗口关闭时的处理"""
