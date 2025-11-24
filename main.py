@@ -1559,18 +1559,18 @@ class TabPage:
                         elif code == 1:
                             # 粗体（暂时忽略）
                             pass
-                        elif code in self.ansi_fg_colors:
-                            # 前景色
-                            current_fg = self.ansi_fg_colors[code]
-                        elif code in self.ansi_bg_colors:
-                            # 背景色
-                            current_bg = self.ansi_bg_colors[code]
                         elif 30 <= code <= 37:
-                            # 标准前景色
+                            # 标准前景色（30-37）
                             current_fg = self.ansi_fg_colors.get(code, "#FFFFFF")
                         elif 40 <= code <= 47:
-                            # 标准背景色
+                            # 标准背景色（40-47）
                             current_bg = self.ansi_bg_colors.get(code)
+                        elif code in self.ansi_fg_colors:
+                            # 其他前景色（如90-97）
+                            current_fg = self.ansi_fg_colors[code]
+                        elif code in self.ansi_bg_colors:
+                            # 其他背景色
+                            current_bg = self.ansi_bg_colors[code]
                     except ValueError:
                         pass
             
