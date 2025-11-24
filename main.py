@@ -1641,6 +1641,7 @@ class TabPage:
                     continue
                 # 先处理控制字符（如BS、DEL）并获取清理后的文本
                 text, input_start = self.process_control_chars(input_start, text)
+                text = self.strip_control_sequences(text)
                 if text:
                     # 处理ANSI颜色编码
                     self.insert_ansi_text(input_start, text)
@@ -1662,18 +1663,48 @@ class TabPage:
         
         while i < length:
             ch = text[i]
-            if ch in ('\x08', '\b', '\x7f'):  # 处理Backspace/DEL
-                if cleaned_chars:
-                    cleaned_chars.pop()
-                else:
-                    try:
-                        prev_pos = self.output_text.index(f"{current_pos} - 1 chars")
-                        if self.output_text.compare(prev_pos, ">=", "1.0"):
-                            self.output_text.delete(prev_pos, current_pos)
-                            current_pos = prev_pos
-                    except Exception:
-                        pass
+            if ch in ('\x08', '\b', '\x7f'):  # 处理Backspace/DEL或光标左移
+                # 检查典型删除序列：\b \s \b
+                if text[i:i+3] == '\x08 \x08' or text[i:i+3] == '\b \b':
+                    # 真正的删除：移除一个字符并跳过整个序列
+                    if cleaned_chars:
+                        cleaned_chars.pop()
+                    else:
+                        try:
+                            prev_pos = self.output_text.index(f"{current_pos} - 1 chars")
+                            if self.output_text.compare(prev_pos, ">=", "1.0"):
+                                self.output_text.delete(prev_pos, current_pos)
+                                current_pos = prev_pos
+                        except Exception:
+                            pass
+                    i += 3
+                    continue
+                # 仅光标左移
+                try:
+                    prev_pos = self.output_text.index(f"{current_pos} - 1 chars")
+                    if self.output_text.compare(prev_pos, ">=", "1.0"):
+                        current_pos = prev_pos
+                except Exception:
+                    pass
                 i += 1
+                continue
+            if text.startswith('\033[D', i):  # CSI 左移
+                try:
+                    prev_pos = self.output_text.index(f"{current_pos} - 1 chars")
+                    if self.output_text.compare(prev_pos, ">=", "1.0"):
+                        current_pos = prev_pos
+                except Exception:
+                    pass
+                i += 3
+                continue
+            if text.startswith('\033[C', i):  # CSI 右移
+                try:
+                    end_pos = self.output_text.index(tk.END)
+                    if self.output_text.compare(current_pos, "<", end_pos):
+                        current_pos = self.output_text.index(f"{current_pos} + 1 chars")
+                except Exception:
+                    pass
+                i += 3
                 continue
             cleaned_chars.append(ch)
             i += 1
@@ -1727,6 +1758,16 @@ class TabPage:
         if match:
             return text[:match.start()], text[match.start():]
         return text, ""
+
+    def strip_control_sequences(self, text):
+        """移除无需显示的控制序列（例如清屏）"""
+        if not text:
+            return text
+        # 去掉 \033[J / \033[0J / \033[1J / \033[2J
+        text = re.sub(r'\033\[\d*J', '', text)
+        # 去掉 \033[K 等清行命令
+        text = re.sub(r'\033\[\d*K', '', text)
+        return text
     
     def insert_ansi_text(self, start_pos, text):
         """插入带ANSI颜色编码的文本"""
@@ -1758,7 +1799,9 @@ class TabPage:
                             self.output_text.tag_config(tag_name, foreground=current_fg)
                         if current_bg:
                             self.output_text.tag_config(tag_name, background=current_bg)
-                    insert_pos = self.output_text.index(tk.END)
+                        insert_pos = end_pos
+                    else:
+                        insert_pos = self.output_text.index(f"{insert_pos} + {len(plain_text)} chars")
             
             # 解析ANSI代码
             code_str = match.group(1)
@@ -1816,6 +1859,9 @@ class TabPage:
                         self.output_text.tag_config(tag_name, foreground=current_fg)
                     if current_bg:
                         self.output_text.tag_config(tag_name, background=current_bg)
+                    insert_pos = end_pos
+                else:
+                    insert_pos = self.output_text.index(f"{insert_pos} + {len(plain_text)} chars")
         
         # 更新实例变量，保持颜色状态
         self.current_fg_color = current_fg
