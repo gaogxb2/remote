@@ -198,6 +198,7 @@ class DeviceConnector:
         self.socket = None
         self.read_thread = None
         self.stop_flag = False
+        self.line_ending = "\n"
     
     def connect(self, **kwargs):
         """连接设备"""
@@ -264,19 +265,19 @@ class TCPConnector(DeviceConnector):
             was_blocking = self.socket.getblocking()
             self.socket.setblocking(True)
             
-            # 如果是单个字符（如实时输入），不添加换行符
-            # 如果是换行符或退格符，直接发送
-            if len(command) == 1 and command in ['\n', '\b', '\r']:
-                data = command.encode('utf-8')
-            elif command == '\r\n':
-                # 如果是 \r\n，直接发送，不添加额外的换行符
+            line_ending = getattr(self, "line_ending", "\n")
+            # 如果是换行符（或用户主动发送\r\n），按照当前配置发送
+            if command in ['\n', '\r\n']:
+                data = line_ending.encode('utf-8')
+            # 对于单独的回车/退格，直接发送
+            elif command in ['\r', '\b', '\x08']:
                 data = command.encode('utf-8')
             elif len(command) == 1:
                 # 单个字符，直接发送
                 data = command.encode('utf-8')
             else:
                 # 多个字符的命令，添加换行符
-                data = (command + '\r\n').encode('utf-8')
+                data = (command + line_ending).encode('utf-8')
             
             self.socket.sendall(data)
             # 恢复原来的阻塞模式
@@ -408,18 +409,18 @@ class TelnetConnector(DeviceConnector):
         if not self.connected or not self.socket:
             return False
         try:
-            # 如果是单个字符（如实时输入），不添加换行符
-            if len(command) == 1 and command in ['\n', '\b', '\r']:
-                data = command.encode('utf-8')
-            elif command == '\r\n':
-                # 如果是 \r\n，直接发送，不添加额外的换行符
+            line_ending = getattr(self, "line_ending", "\n")
+            # 如果是换行符（或用户主动发送\r\n），按照当前配置发送
+            if command in ['\n', '\r\n']:
+                data = line_ending.encode('utf-8')
+            elif command in ['\r', '\b', '\x08']:
                 data = command.encode('utf-8')
             elif len(command) == 1:
                 # 单个字符，直接发送
                 data = command.encode('utf-8')
             else:
                 # 多个字符的命令，添加换行符
-                data = (command + '\r\n').encode('utf-8')
+                data = (command + line_ending).encode('utf-8')
             self.socket.write(data)
             return True
         except Exception as e:
@@ -503,18 +504,18 @@ class SerialConnector(DeviceConnector):
         if not self.connected or not self.socket:
             return False
         try:
-            # 如果是单个字符（如实时输入），不添加换行符
-            if len(command) == 1 and command in ['\n', '\b', '\r']:
-                data = command.encode('utf-8')
-            elif command == '\r\n':
-                # 如果是 \r\n，直接发送，不添加额外的换行符
+            line_ending = getattr(self, "line_ending", "\n")
+            # 如果是换行符（或用户主动发送\r\n），按照当前配置发送
+            if command in ['\n', '\r\n']:
+                data = line_ending.encode('utf-8')
+            elif command in ['\r', '\b', '\x08']:
                 data = command.encode('utf-8')
             elif len(command) == 1:
                 # 单个字符，直接发送
                 data = command.encode('utf-8')
             else:
                 # 多个字符的命令，添加换行符
-                data = (command + '\r\n').encode('utf-8')
+                data = (command + line_ending).encode('utf-8')
             self.socket.write(data)
             return True
         except Exception as e:
@@ -735,6 +736,7 @@ class TabPage:
         self.history_index = -1
         self.capture_text = None
         self.capture_lock = threading.Lock()
+        self.use_crlf = tk.BooleanVar(value=False)
         
         # 智能命令模板
         self.smart_templates = {
@@ -751,7 +753,8 @@ class TabPage:
             "commands": [],
             "sftp": {},
             "smart_templates": self.smart_templates.copy(),
-            "smart_code": ""
+            "smart_code": "",
+            "line_ending_crlf": False
         }
         
         # 初始化文件图标
@@ -1005,6 +1008,13 @@ class TabPage:
         
         ttk.Button(cmd_input_frame, text="发送", command=self.send_quick_command).grid(row=0, column=2, padx=5, pady=5)
         
+        ttk.Checkbutton(
+            cmd_input_frame,
+            text="使用CRLF换行 (\\r\\n)",
+            variable=self.use_crlf,
+            command=self.on_line_ending_toggle
+        ).grid(row=1, column=0, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
+        
         # 常用命令按钮
         common_cmds_frame = ttk.Frame(cmd_send_frame)
         common_cmds_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
@@ -1232,6 +1242,7 @@ class TabPage:
                     messagebox.showerror("错误", "请输入主机地址和端口")
                     return
                 self.connector = TCPConnector(self.append_output, self.write_raw_log)
+                self.apply_line_ending_to_connector()
                 success = self.connector.connect(host=host, port=port)
                 
             elif conn_type == "Telnet":
@@ -1241,6 +1252,7 @@ class TabPage:
                     messagebox.showerror("错误", "请输入主机地址和端口")
                     return
                 self.connector = TelnetConnector(self.append_output, self.write_raw_log)
+                self.apply_line_ending_to_connector()
                 success = self.connector.connect(host=host, port=port)
                 
             elif conn_type == "串口":
@@ -1250,6 +1262,7 @@ class TabPage:
                     messagebox.showerror("错误", "请选择串口")
                     return
                 self.connector = SerialConnector(self.append_output, self.write_raw_log)
+                self.apply_line_ending_to_connector()
                 success = self.connector.connect(port=port, baudrate=baudrate)
                 # 串口连接也保存配置（port作为host，baudrate作为port）
                 if success:
@@ -1533,7 +1546,7 @@ class TabPage:
             self.output_text.config(state=tk.NORMAL)
 
         try:
-            self.connector.send_command('\r\n')
+            self.connector.send_command(self.get_line_ending())
         except Exception:
             pass
 
@@ -1847,6 +1860,23 @@ class TabPage:
         self.quick_cmd_entry.delete(0, tk.END)
         self.quick_cmd_entry.insert(0, command)
         self.send_quick_command()
+
+    def get_line_ending(self):
+        """根据当前设置返回换行符"""
+        return "\r\n" if self.use_crlf.get() else "\n"
+
+    def apply_line_ending_to_connector(self):
+        """将当前换行设置应用到连接器"""
+        if self.connector:
+            self.connector.line_ending = self.get_line_ending()
+
+    def on_line_ending_toggle(self):
+        """切换换行符设置"""
+        self.config["line_ending_crlf"] = self.use_crlf.get()
+        self.apply_line_ending_to_connector()
+        top = self.root.winfo_toplevel()
+        if hasattr(top, "save_config"):
+            top.save_config()
     
     def history_up(self):
         """命令历史向上"""
@@ -2543,6 +2573,15 @@ class TabPage:
             self.last_smart_code = config.get("smart_code", "")
             self.smart_text.delete("1.0", tk.END)
             self.smart_text.insert(tk.END, self.last_smart_code)
+
+        # 恢复换行符设置
+        if "line_ending_crlf" in config:
+            line_ending_crlf = bool(config.get("line_ending_crlf", False))
+        else:
+            line_ending_crlf = False
+        self.use_crlf.set(line_ending_crlf)
+        self.config["line_ending_crlf"] = line_ending_crlf
+        self.apply_line_ending_to_connector()
         
         # 恢复SFTP配置
         if "sftp" in config:
