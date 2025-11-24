@@ -66,6 +66,54 @@ def end_receive():
     """结束捕获单板回显并返回内容"""
     tab = _require_active_tab()
     return tab.end_capture()
+
+
+def send_file(source_path, dest_path):
+    """
+    传输文件：支持本地到远程或远程到本地
+    参数:
+        source_path: 源文件路径（本地或远程）
+        dest_path: 目标文件路径（本地或远程）
+    返回:
+        (success: bool, message: str)
+    """
+    tab = _require_active_tab()
+    
+    if not tab.sftp_connector or not tab.sftp_connector.connected:
+        return False, "SFTP未连接，请先连接SFTP"
+    
+    # 判断路径类型：如果源路径存在且是本地文件，则为本地->远程
+    # 否则如果目标路径存在且是本地文件，则为远程->本地
+    source_is_local = os.path.exists(source_path)
+    dest_is_local = os.path.exists(dest_path)
+    
+    if source_is_local and not dest_is_local:
+        # 本地 -> 远程
+        success, msg = tab.sftp_connector.upload_file(source_path, dest_path)
+        if success:
+            return True, f"文件已上传: {source_path} -> {dest_path}"
+        else:
+            return False, f"上传失败: {msg}"
+    elif not source_is_local and dest_is_local:
+        # 远程 -> 本地
+        success, msg = tab.sftp_connector.download_file(source_path, dest_path)
+        if success:
+            return True, f"文件已下载: {source_path} -> {dest_path}"
+        else:
+            return False, f"下载失败: {msg}"
+    elif source_is_local and dest_is_local:
+        # 两个都是本地路径，使用本地文件复制
+        try:
+            import shutil
+            shutil.copy2(source_path, dest_path)
+            return True, f"文件已复制: {source_path} -> {dest_path}"
+        except Exception as e:
+            return False, f"复制失败: {str(e)}"
+    else:
+        # 两个都是远程路径，不支持远程到远程的直接传输
+        return False, "不支持远程到远程的文件传输，请先下载到本地再上传"
+
+
 import json
 
 
@@ -942,6 +990,10 @@ class TabPage:
         ttk.Button(smart_btn_frame, text="清空", command=lambda: self.smart_text.delete("1.0", tk.END)).pack(
             side=tk.LEFT, padx=5)
         ttk.Button(smart_btn_frame, text="保存代码", command=self.manual_save_smart_code).pack(
+            side=tk.LEFT, padx=5)
+        ttk.Button(smart_btn_frame, text="保存到文件", command=self.save_smart_code_to_file).pack(
+            side=tk.LEFT, padx=5)
+        ttk.Button(smart_btn_frame, text="读取文件", command=self.load_smart_code_from_file).pack(
             side=tk.LEFT, padx=5)
         
         self.refresh_smart_templates()
@@ -1846,6 +1898,7 @@ class TabPage:
             "• start_receive(): 开始捕获单板回显\n"
             "• get_receive(): 获取捕获内容但不结束\n"
             "• end_receive(): 结束捕获并返回文本\n"
+            "• send_file(src, dst): 传输文件（本地<->远程）\n"
             "• print(...): 将信息输出到脚本输出窗口\n"
             "• wait(seconds): 等同于 time.sleep，用于延时\n\n"
             "可以编写多行 Python 代码，例如循环发送命令、等待回显等。"
@@ -1866,6 +1919,7 @@ class TabPage:
                 "start_receive": start_receive,
                 "end_receive": end_receive,
                 "get_receive": get_receive,
+                "send_file": send_file,
                 "wait": time.sleep,
                 "sleep": time.sleep
             }
@@ -1902,6 +1956,62 @@ class TabPage:
         """手动保存智能命令编辑区内容"""
         content = self.save_current_smart_code()
         messagebox.showinfo("提示", "代码块内容已保存" if content else "当前代码块为空，已保存为空内容")
+    
+    def save_smart_code_to_file(self):
+        """将当前代码块保存到txt文件"""
+        content = self.smart_text.get("1.0", tk.END).rstrip()
+        if not content:
+            messagebox.showwarning("警告", "当前代码块为空，无法保存")
+            return
+        
+        # 选择保存位置
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+            title="保存代码到文件"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            messagebox.showinfo("成功", f"代码已保存到: {file_path}")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存文件失败: {str(e)}")
+    
+    def load_smart_code_from_file(self):
+        """从txt文件读取代码到当前代码块，并根据文件名自动生成模板标题"""
+        # 选择文件
+        file_path = filedialog.askopenfilename(
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+            title="从文件读取代码"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 读取代码到编辑区
+            self.smart_text.delete("1.0", tk.END)
+            self.smart_text.insert("1.0", content)
+            
+            # 根据文件名生成模板标题（去掉路径和扩展名）
+            file_name = os.path.basename(file_path)
+            template_title = os.path.splitext(file_name)[0]
+            
+            # 设置模板标题
+            self.smart_title_entry.delete(0, tk.END)
+            self.smart_title_entry.insert(0, template_title)
+            self.current_template_name = template_title
+            
+            messagebox.showinfo("成功", f"代码已从文件加载: {file_path}\n模板标题已自动设置为: {template_title}")
+        except Exception as e:
+            messagebox.showerror("错误", f"读取文件失败: {str(e)}")
     
     def toggle_sftp_connection(self):
         """切换SFTP连接状态"""
