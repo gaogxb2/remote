@@ -730,6 +730,7 @@ class TabPage:
         self.log_file_path = None
         self.raw_log_file = None
         self.raw_log_file_path = None
+        self.partial_output = ""
         
         # 命令历史
         self.command_history = []
@@ -1625,12 +1626,19 @@ class TabPage:
         """检查输出队列并更新显示"""
         try:
             while True:
-                text = self.output_queue.get_nowait()
+                chunk = self.output_queue.get_nowait()
                 self.output_text.config(state=tk.NORMAL)
-                self.append_capture(text)
+                self.append_capture(chunk)
                 # 在输入提示符之前插入输出内容
                 input_start = self.output_text.index(self.input_start_mark)
-                self.log_std_message(text)
+                self.log_std_message(chunk)
+                combined_text = (self.partial_output or "") + chunk
+                self.partial_output = ""
+                text, remainder = self.split_incomplete_sequences(combined_text)
+                if remainder:
+                    self.partial_output = remainder
+                if not text:
+                    continue
                 # 先处理控制字符（如BS、DEL）并获取清理后的文本
                 text, input_start = self.process_control_chars(input_start, text)
                 if text:
@@ -1702,6 +1710,23 @@ class TabPage:
         self.std_output.insert(tk.END, f"[{timestamp}] {formatted}\n")
         self.std_output.see(tk.END)
         self.std_output.config(state=tk.DISABLED)
+
+    def split_incomplete_sequences(self, text):
+        """拆分末尾未完整的ANSI序列，返回可处理文本和剩余缓冲"""
+        if not text:
+            return "", ""
+        # 如果以 ESC 结尾，直接缓冲
+        if text.endswith("\033"):
+            return text[:-1], "\033"
+        # 匹配未完成的CSI序列（以 \033[ 开头但尚未有终止符）
+        match = re.search(r'\033\[[0-9;?]*$', text)
+        if match:
+            return text[:match.start()], text[match.start():]
+        # 匹配未完成的OSC序列（\033] ... 尚未遇到BEL或ESC\\）
+        match = re.search(r'\033\][^\007]*$', text)
+        if match:
+            return text[:match.start()], text[match.start():]
+        return text, ""
     
     def insert_ansi_text(self, start_pos, text):
         """插入带ANSI颜色编码的文本"""
