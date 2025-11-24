@@ -880,6 +880,7 @@ class TabPage:
         # 连接方式选择
         self.frame.columnconfigure(0, weight=3)
         self.frame.columnconfigure(1, weight=2)
+        self.frame.columnconfigure(2, weight=1)
         for i in range(4):
             self.frame.rowconfigure(i, weight=0)
         self.frame.rowconfigure(3, weight=1)
@@ -1093,6 +1094,21 @@ class TabPage:
         echo_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(4, 0))
         self.smart_output = scrolledtext.ScrolledText(echo_frame, height=5, wrap=tk.WORD, state=tk.DISABLED)
         self.smart_output.pack(fill=tk.BOTH, expand=True)
+
+        # STD调试输出窗口（最右侧）
+        std_frame = ttk.LabelFrame(self.frame, text="STD输出", padding="10")
+        std_frame.grid(row=0, column=2, rowspan=4, sticky=(tk.N, tk.S, tk.E, tk.W), padx=(10, 0))
+        std_frame.columnconfigure(0, weight=1)
+        std_frame.rowconfigure(0, weight=1)
+
+        self.std_output = scrolledtext.ScrolledText(
+            std_frame,
+            height=30,
+            wrap=tk.NONE,
+            state=tk.DISABLED,
+            font=("Consolas", 10)
+        )
+        self.std_output.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
         
         # SFTP连接设置
         sftp_conn_frame = ttk.Frame(sftp_frame)
@@ -1614,6 +1630,7 @@ class TabPage:
                 self.append_capture(text)
                 # 在输入提示符之前插入输出内容
                 input_start = self.output_text.index(self.input_start_mark)
+                self.log_std_message(text)
                 # 先处理控制字符（如BS、DEL）并获取清理后的文本
                 text, input_start = self.process_control_chars(input_start, text)
                 if text:
@@ -1655,6 +1672,36 @@ class TabPage:
         
         cleaned_text = ''.join(cleaned_chars)
         return cleaned_text, current_pos
+
+    def format_raw_text(self, raw_text):
+        """将原始文本转换为可读的转义形式"""
+        result = []
+        for ch in raw_text:
+            code = ord(ch)
+            if ch == '\x1b':
+                result.append(r"\033")
+            elif ch == '\n':
+                result.append(r"\n")
+            elif ch == '\r':
+                result.append(r"\r")
+            elif ch == '\t':
+                result.append(r"\t")
+            elif 32 <= code <= 126:
+                result.append(ch)
+            else:
+                result.append(f"\\x{code:02x}")
+        return ''.join(result)
+
+    def log_std_message(self, raw_text):
+        """在STD输出窗口中记录调试信息"""
+        if not hasattr(self, "std_output"):
+            return
+        formatted = self.format_raw_text(raw_text)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.std_output.config(state=tk.NORMAL)
+        self.std_output.insert(tk.END, f"[{timestamp}] {formatted}\n")
+        self.std_output.see(tk.END)
+        self.std_output.config(state=tk.DISABLED)
     
     def insert_ansi_text(self, start_pos, text):
         """插入带ANSI颜色编码的文本"""
