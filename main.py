@@ -75,12 +75,12 @@ def send_file(source_path, dest_path):
         source_path: 源文件路径（本地或远程）
         dest_path: 目标文件路径（本地或远程）
     返回:
-        (success: bool, message: str)
+        bool: 成功返回True，失败返回False
     """
     tab = _require_active_tab()
     
     if not tab.sftp_connector or not tab.sftp_connector.connected:
-        return False, "SFTP未连接，请先连接SFTP"
+        return False
     
     # 判断路径类型：如果源路径存在且是本地文件，则为本地->远程
     # 否则如果目标路径存在且是本地文件，则为远程->本地
@@ -90,28 +90,99 @@ def send_file(source_path, dest_path):
     if source_is_local and not dest_is_local:
         # 本地 -> 远程
         success, msg = tab.sftp_connector.upload_file(source_path, dest_path)
-        if success:
-            return True, f"文件已上传: {source_path} -> {dest_path}"
-        else:
-            return False, f"上传失败: {msg}"
+        return success
     elif not source_is_local and dest_is_local:
         # 远程 -> 本地
         success, msg = tab.sftp_connector.download_file(source_path, dest_path)
-        if success:
-            return True, f"文件已下载: {source_path} -> {dest_path}"
-        else:
-            return False, f"下载失败: {msg}"
+        return success
     elif source_is_local and dest_is_local:
         # 两个都是本地路径，使用本地文件复制
         try:
             import shutil
             shutil.copy2(source_path, dest_path)
-            return True, f"文件已复制: {source_path} -> {dest_path}"
+            return True
         except Exception as e:
-            return False, f"复制失败: {str(e)}"
+            return False
     else:
         # 两个都是远程路径，不支持远程到远程的直接传输
-        return False, "不支持远程到远程的文件传输，请先下载到本地再上传"
+        return False
+
+
+def sftp_connect(host, port, username, password):
+    """
+    建立SFTP连接
+    参数:
+        host: 主机IP地址
+        port: 端口号（字符串或整数）
+        username: 用户名
+        password: 密码
+    返回:
+        bool: 成功返回True，失败返回False
+    """
+    tab = _require_active_tab()
+    
+    try:
+        # 如果已经连接，先断开
+        if tab.sftp_connector and tab.sftp_connector.connected:
+            tab.sftp_connector.disconnect()
+        
+        # 创建新的连接器（SFTPConnector在同一个文件中定义）
+        # 使用globals()获取当前模块中定义的类
+        SFTPConnector = globals().get('SFTPConnector')
+        if SFTPConnector is None:
+            return False
+        
+        tab.sftp_connector = SFTPConnector()
+        
+        # 连接
+        result = tab.sftp_connector.connect(str(host), str(port), str(username), str(password))
+        
+        # 处理返回值
+        if isinstance(result, tuple):
+            success, error_msg = result
+        else:
+            success = result
+            error_msg = ""
+        
+        if success:
+            # 更新UI状态
+            tab.sftp_connect_btn.config(text="断开SFTP")
+            tab.sftp_status_label.config(text="SFTP: 已连接", foreground="green")
+            tab.remote_path = tab.sftp_connector.get_current_directory()
+            tab.remote_path_entry.delete(0, tk.END)
+            tab.remote_path_entry.insert(0, tab.remote_path)
+            tab.refresh_remote_files()
+            # 保存SFTP配置
+            tab.save_sftp_config(str(host), str(port), str(username), str(password))
+        
+        return success
+    except Exception as e:
+        return False
+
+
+def sftp_disconnect():
+    """
+    关闭当前的SFTP连接
+    返回:
+        bool: 成功返回True，失败返回False
+    """
+    tab = _require_active_tab()
+    
+    try:
+        if tab.sftp_connector:
+            tab.sftp_connector.disconnect()
+            tab.sftp_connector = None
+        
+        # 更新UI状态
+        tab.sftp_connect_btn.config(text="连接SFTP")
+        tab.sftp_status_label.config(text="SFTP: 未连接", foreground="red")
+        # 清空Treeview
+        for item in tab.remote_files_tree.get_children():
+            tab.remote_files_tree.delete(item)
+        
+        return True
+    except Exception as e:
+        return False
 
 
 import json
@@ -197,12 +268,15 @@ class TCPConnector(DeviceConnector):
             # 如果是换行符或退格符，直接发送
             if len(command) == 1 and command in ['\n', '\b', '\r']:
                 data = command.encode('utf-8')
+            elif command == '\r\n':
+                # 如果是 \r\n，直接发送，不添加额外的换行符
+                data = command.encode('utf-8')
             elif len(command) == 1:
                 # 单个字符，直接发送
                 data = command.encode('utf-8')
             else:
                 # 多个字符的命令，添加换行符
-                data = (command + '\n').encode('utf-8')
+                data = (command + '\r\n').encode('utf-8')
             
             self.socket.sendall(data)
             # 恢复原来的阻塞模式
@@ -337,12 +411,15 @@ class TelnetConnector(DeviceConnector):
             # 如果是单个字符（如实时输入），不添加换行符
             if len(command) == 1 and command in ['\n', '\b', '\r']:
                 data = command.encode('utf-8')
+            elif command == '\r\n':
+                # 如果是 \r\n，直接发送，不添加额外的换行符
+                data = command.encode('utf-8')
             elif len(command) == 1:
                 # 单个字符，直接发送
                 data = command.encode('utf-8')
             else:
                 # 多个字符的命令，添加换行符
-                data = (command + '\n').encode('utf-8')
+                data = (command + '\r\n').encode('utf-8')
             self.socket.write(data)
             return True
         except Exception as e:
@@ -429,12 +506,15 @@ class SerialConnector(DeviceConnector):
             # 如果是单个字符（如实时输入），不添加换行符
             if len(command) == 1 and command in ['\n', '\b', '\r']:
                 data = command.encode('utf-8')
+            elif command == '\r\n':
+                # 如果是 \r\n，直接发送，不添加额外的换行符
+                data = command.encode('utf-8')
             elif len(command) == 1:
                 # 单个字符，直接发送
                 data = command.encode('utf-8')
             else:
                 # 多个字符的命令，添加换行符
-                data = (command + '\n').encode('utf-8')
+                data = (command + '\r\n').encode('utf-8')
             self.socket.write(data)
             return True
         except Exception as e:
@@ -1453,7 +1533,7 @@ class TabPage:
             self.output_text.config(state=tk.NORMAL)
 
         try:
-            self.connector.send_command('\n')
+            self.connector.send_command('\r\n')
         except Exception:
             pass
 
@@ -1898,7 +1978,9 @@ class TabPage:
             "• start_receive(): 开始捕获单板回显\n"
             "• get_receive(): 获取捕获内容但不结束\n"
             "• end_receive(): 结束捕获并返回文本\n"
-            "• send_file(src, dst): 传输文件（本地<->远程）\n"
+            "• send_file(src, dst): 传输文件（本地<->远程），返回True/False\n"
+            "• sftp_connect(host, port, user, pwd): 建立SFTP连接，返回True/False\n"
+            "• sftp_disconnect(): 关闭SFTP连接，返回True/False\n"
             "• print(...): 将信息输出到脚本输出窗口\n"
             "• wait(seconds): 等同于 time.sleep，用于延时\n\n"
             "可以编写多行 Python 代码，例如循环发送命令、等待回显等。"
@@ -1920,6 +2002,8 @@ class TabPage:
                 "end_receive": end_receive,
                 "get_receive": get_receive,
                 "send_file": send_file,
+                "sftp_connect": sftp_connect,
+                "sftp_disconnect": sftp_disconnect,
                 "wait": time.sleep,
                 "sleep": time.sleep
             }
