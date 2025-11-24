@@ -1645,9 +1645,9 @@ class TabPage:
     
     def insert_ansi_text(self, start_pos, text):
         """插入带ANSI颜色编码的文本"""
-        # 重置当前颜色
-        current_fg = "#FFFFFF"
-        current_bg = None
+        # 使用实例变量保持颜色状态
+        current_fg = self.current_fg_color
+        current_bg = self.current_bg_color
         
         # 查找所有ANSI转义序列
         last_pos = 0
@@ -1659,13 +1659,17 @@ class TabPage:
                 plain_text = text[last_pos:match.start()]
                 if plain_text:
                     self.output_text.insert(insert_pos, plain_text)
-                    # 应用当前颜色
+                    # 应用当前颜色（如果与默认不同，或者有背景色）
                     if current_fg != "#FFFFFF" or current_bg:
                         end_pos = self.output_text.index(f"{insert_pos} + {len(plain_text)} chars")
                         tag_name = f"ansi_seg_{self.ansi_tag_counter}"
                         self.ansi_tag_counter += 1
                         self.output_text.tag_add(tag_name, insert_pos, end_pos)
+                        # 明确设置前景色（即使与默认相同，也要设置以确保tag生效）
                         if current_fg != "#FFFFFF":
+                            self.output_text.tag_config(tag_name, foreground=current_fg)
+                        elif current_bg:
+                            # 如果有背景色但前景色是白色，也要设置前景色以确保tag生效
                             self.output_text.tag_config(tag_name, foreground=current_fg)
                         if current_bg:
                             self.output_text.tag_config(tag_name, background=current_bg)
@@ -1713,21 +1717,32 @@ class TabPage:
             plain_text = text[last_pos:]
             if plain_text:
                 self.output_text.insert(insert_pos, plain_text)
-                # 应用当前颜色
+                # 应用当前颜色（如果与默认不同，或者有背景色）
                 if current_fg != "#FFFFFF" or current_bg:
                     end_pos = self.output_text.index(f"{insert_pos} + {len(plain_text)} chars")
                     tag_name = f"ansi_seg_{self.ansi_tag_counter}"
                     self.ansi_tag_counter += 1
                     self.output_text.tag_add(tag_name, insert_pos, end_pos)
+                    # 明确设置前景色（即使与默认相同，也要设置以确保tag生效）
                     if current_fg != "#FFFFFF":
+                        self.output_text.tag_config(tag_name, foreground=current_fg)
+                    elif current_bg:
+                        # 如果有背景色但前景色是白色，也要设置前景色以确保tag生效
                         self.output_text.tag_config(tag_name, foreground=current_fg)
                     if current_bg:
                         self.output_text.tag_config(tag_name, background=current_bg)
+        
+        # 更新实例变量，保持颜色状态
+        self.current_fg_color = current_fg
+        self.current_bg_color = current_bg
     
     def clear_output(self):
         """清空输出"""
         self.output_text.config(state=tk.NORMAL)
         self.output_text.delete(1.0, tk.END)
+        # 重置颜色状态
+        self.current_fg_color = "#FFFFFF"
+        self.current_bg_color = None
         # 重新添加输入提示符
         self.add_input_prompt()
         self.output_text.config(state=tk.NORMAL)
