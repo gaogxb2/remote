@@ -1659,7 +1659,27 @@ class TabPage:
                 self.partial_output = remainder
             
             if text:
-                # 先处理控制字符（如BS、DEL）并获取清理后的文本
+                # 先统计退格数量，处理退格（从已显示的文本中删除字符）
+                # 注意：\x08 和 \b 是同一个字符，不要重复统计
+                backspace_count = 0
+                for ch in text:
+                    if ch in ('\x08', '\b', '\x7f'):
+                        backspace_count += 1
+                if backspace_count > 0:
+                    # 从 input_start 之前删除字符
+                    try:
+                        # 获取 input_start 之前的内容
+                        text_before_input = self.output_text.get("1.0", input_start)
+                        if len(text_before_input) >= backspace_count:
+                            # 删除最后 backspace_count 个字符
+                            delete_start = self.output_text.index(f"{input_start} - {backspace_count} chars")
+                            self.output_text.delete(delete_start, input_start)
+                            # 更新 input_start 位置
+                            input_start = self.output_text.index(self.input_start_mark)
+                    except:
+                        pass
+                
+                # 处理控制字符（如BS、DEL）并获取清理后的文本
                 text, input_start = self.process_control_chars(input_start, text)
                 text = self.strip_control_sequences(text)
                 if text:
@@ -2814,6 +2834,425 @@ class TabPage:
             self.disconnect_sftp()
 
 
+class DebugWindow:
+    """调试窗口 - 用于测试输出显示功能"""
+    
+    def __init__(self, parent, app):
+        self.parent = parent
+        self.app = app
+        self.test_cases = []
+        
+        # 创建调试窗口
+        self.window = tk.Toplevel(parent)
+        self.window.title("调试模式 - 测试用例")
+        self.window.geometry("1200x800")
+        
+        # 主框架
+        main_frame = ttk.Frame(self.window, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 顶部：加载测试用例按钮
+        top_frame = ttk.Frame(main_frame)
+        top_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(top_frame, text="加载测试用例", command=self.load_test_cases).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top_frame, text="运行选中测试", command=self.run_selected_test).pack(side=tk.LEFT, padx=5)
+        
+        # 左侧：测试用例列表
+        left_frame = ttk.Frame(main_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 10))
+        left_frame.config(width=300)
+        
+        ttk.Label(left_frame, text="测试用例列表:").pack(anchor=tk.W, pady=(0, 5))
+        list_frame = ttk.Frame(left_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.test_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set)
+        self.test_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.test_listbox.yview)
+        
+        # 右侧：结果显示区域
+        right_frame = ttk.Frame(main_frame)
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # 创建标签页显示实际输出和预期输出
+        notebook = ttk.Notebook(right_frame)
+        notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # 实际输出标签页
+        actual_frame = ttk.Frame(notebook)
+        notebook.add(actual_frame, text="实际输出")
+        
+        actual_scroll = ttk.Scrollbar(actual_frame)
+        actual_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.actual_text = tk.Text(actual_frame, yscrollcommand=actual_scroll.set, wrap=tk.NONE, font=("Consolas", 10))
+        self.actual_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        actual_scroll.config(command=self.actual_text.yview)
+        
+        # 预期输出标签页
+        expected_frame = ttk.Frame(notebook)
+        notebook.add(expected_frame, text="预期输出")
+        
+        expected_scroll = ttk.Scrollbar(expected_frame)
+        expected_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.expected_text = tk.Text(expected_frame, yscrollcommand=expected_scroll.set, wrap=tk.NONE, font=("Consolas", 10))
+        self.expected_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        expected_scroll.config(command=self.expected_text.yview)
+        
+        # 差异对比标签页
+        diff_frame = ttk.Frame(notebook)
+        notebook.add(diff_frame, text="差异对比")
+        
+        diff_scroll = ttk.Scrollbar(diff_frame)
+        diff_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.diff_text = tk.Text(diff_frame, yscrollcommand=diff_scroll.set, wrap=tk.NONE, font=("Consolas", 10))
+        self.diff_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        diff_scroll.config(command=self.diff_text.yview)
+        
+        # 状态栏
+        self.status_label = ttk.Label(main_frame, text="就绪")
+        self.status_label.pack(fill=tk.X, pady=(10, 0))
+        
+        # 自动加载测试用例
+        self.load_test_cases()
+    
+    def decode_escape_sequences(self, text):
+        """解码转义序列（如 \\x08, \\033 等）
+        在 JSON 中，这些已经写成 \\x08, \\033 等，解析后会变成 \x08, \033（字符串）
+        需要将它们转换为实际的字符
+        """
+        if not isinstance(text, str):
+            return text
+        try:
+            import re
+            import codecs
+            
+            # 方法：将字符串转换为原始字符串，然后使用 codecs.decode
+            # 但需要先处理特殊字符，避免与常见转义冲突
+            
+            # 先处理常见的转义序列（这些在 JSON 中已经是 \\n 等格式）
+            common_escapes = {
+                '\\n': '\n',
+                '\\r': '\r',
+                '\\t': '\t',
+                '\\b': '\b',
+                '\\f': '\f',
+                '\\v': '\v',
+                '\\a': '\a',
+                "\\'": "'",
+                '\\"': '"',
+            }
+            
+            # 临时替换常见转义，避免后续处理时冲突
+            temp_map = {}
+            for i, (old, new) in enumerate(common_escapes.items()):
+                temp_key = f'__TEMP_ESCAPE_{i}__'
+                temp_map[temp_key] = new
+                text = text.replace(old, temp_key)
+            
+            # 处理十六进制转义 \xHH
+            def replace_hex(match):
+                hex_str = match.group(1)
+                try:
+                    return chr(int(hex_str, 16))
+                except:
+                    return match.group(0)
+            text = re.sub(r'\\x([0-9a-fA-F]{2})', replace_hex, text)
+            
+            # 处理八进制转义 \OOO（1-3位八进制数字，但排除已处理的常见转义）
+            def replace_oct(match):
+                oct_str = match.group(1)
+                try:
+                    # 确保是有效的八进制数字
+                    if all(c in '01234567' for c in oct_str):
+                        return chr(int(oct_str, 8))
+                except:
+                    pass
+                return match.group(0)
+            # 匹配 \ 后跟1-3位八进制数字
+            text = re.sub(r'\\([0-7]{1,3})(?![0-9a-fA-Fx])', replace_oct, text)
+            
+            # 恢复常见转义
+            for temp_key, new in temp_map.items():
+                text = text.replace(temp_key, new)
+            
+            # 最后处理反斜杠本身（必须是最后）
+            text = text.replace('\\\\', '\\')
+            
+            return text
+        except Exception as e:
+            # 如果解码失败，返回原字符串
+            import traceback
+            traceback.print_exc()
+            return text
+    
+    def load_test_cases(self):
+        """加载测试用例文件"""
+        test_file = "test_cases.json"
+        if not os.path.exists(test_file):
+            self.status_label.config(text=f"测试用例文件不存在: {test_file}")
+            return
+        
+        try:
+            with open(test_file, 'r', encoding='utf-8') as f:
+                self.test_cases = json.load(f)
+            
+            # 解码转义序列
+            for test_case in self.test_cases:
+                # 解码 device_outputs
+                if 'device_outputs' in test_case:
+                    test_case['device_outputs'] = [
+                        self.decode_escape_sequences(output) 
+                        for output in test_case['device_outputs']
+                    ]
+                # 解码 expected_display
+                if 'expected_display' in test_case:
+                    test_case['expected_display'] = self.decode_escape_sequences(
+                        test_case['expected_display']
+                    )
+            
+            # 更新列表
+            self.test_listbox.delete(0, tk.END)
+            for i, test_case in enumerate(self.test_cases):
+                name = test_case.get('name', f'测试用例 {i+1}')
+                self.test_listbox.insert(tk.END, name)
+            
+            self.status_label.config(text=f"已加载 {len(self.test_cases)} 个测试用例")
+        except Exception as e:
+            self.status_label.config(text=f"加载测试用例失败: {e}")
+            messagebox.showerror("错误", f"加载测试用例失败: {e}")
+    
+    def run_selected_test(self):
+        """运行选中的测试用例"""
+        selection = self.test_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("警告", "请先选择一个测试用例")
+            return
+        
+        test_index = selection[0]
+        test_case = self.test_cases[test_index]
+        
+        self.status_label.config(text=f"正在运行: {test_case.get('name', '测试用例')}")
+        
+        # 创建一个临时的 TabPage 来模拟
+        # 我们需要创建一个模拟的 TabPage，不实际连接设备
+        try:
+            # 创建临时标签页用于测试
+            temp_tab = self.app.add_tab(f"调试-{test_case.get('name', '测试')}")
+            temp_tab_page = self.app.tabs[list(self.app.tabs.keys())[-1]]
+            
+            # 创建一个模拟的 connector，避免连接检查错误
+            class MockConnector:
+                def __init__(self):
+                    self.connected = True
+                def send_command(self, cmd):
+                    pass  # 调试模式下不实际发送
+            
+            if not hasattr(temp_tab_page, 'connector') or temp_tab_page.connector is None:
+                temp_tab_page.connector = MockConnector()
+            
+            # 清空输出区域
+            temp_tab_page.clear_output()
+            
+            # 模拟执行测试用例
+            self.execute_test_case(temp_tab_page, test_case)
+            
+            # 等待所有处理完成
+            self.window.update()
+            time.sleep(0.1)
+            
+            # 显示结果
+            self.show_test_results(temp_tab_page, test_case)
+            
+            self.status_label.config(text=f"测试完成: {test_case.get('name', '测试用例')}")
+        except Exception as e:
+            self.status_label.config(text=f"测试失败: {e}")
+            messagebox.showerror("错误", f"测试执行失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def execute_test_case(self, tab_page, test_case):
+        """执行测试用例，模拟输入和输出"""
+        inputs = test_case.get('inputs', [])
+        device_outputs = test_case.get('device_outputs', [])
+        
+        # 先处理所有输入（模拟用户操作）
+        for input_item in inputs:
+            if input_item['type'] == 'key':
+                # 模拟按键
+                tab_page.input_buffer.append(input_item['value'])
+                tab_page.input_cursor = len(tab_page.input_buffer)
+                tab_page.redraw_input_line()
+                self.window.update()
+                time.sleep(0.01)
+            elif input_item['type'] == 'left':
+                # 模拟光标左移
+                for _ in range(input_item.get('count', 1)):
+                    if tab_page.input_cursor > 0:
+                        tab_page.input_cursor -= 1
+                tab_page.redraw_input_line()
+                self.window.update()
+                time.sleep(0.01)
+            elif input_item['type'] == 'return':
+                # 模拟回车
+                line = ''.join(tab_page.input_buffer)
+                tab_page.reset_input_buffer()
+                self.window.update()
+                time.sleep(0.01)
+        
+        # 然后处理所有设备输出（模拟设备响应）
+        # 设备输出可能分多次到达，需要逐个处理
+        for device_output in device_outputs:
+            if device_output:
+                # 将输出放入队列
+                tab_page.output_queue.put(device_output)
+                # 直接处理输出队列（同步处理，不使用 after）
+                self.process_output_queue_sync(tab_page)
+                # 更新界面
+                self.window.update()
+                time.sleep(0.01)  # 短暂延迟确保处理完成
+        
+        # 处理剩余的队列数据
+        while not tab_page.output_queue.empty():
+            self.process_output_queue_sync(tab_page)
+            self.window.update()
+            time.sleep(0.01)
+    
+    def process_output_queue_sync(self, tab_page):
+        """同步处理输出队列（用于调试模式）"""
+        max_chars_per_frame = 10000
+        max_chunks_per_frame = 50
+        processed_chars = 0
+        processed_chunks = 0
+        
+        tab_page.output_text.config(state=tk.NORMAL)
+        
+        # 批量收集chunks
+        chunks_to_process = []
+        try:
+            while processed_chunks < max_chunks_per_frame:
+                chunk = tab_page.output_queue.get_nowait()
+                chunk_size = len(chunk)
+                
+                if processed_chars + chunk_size > max_chars_per_frame:
+                    tab_page.output_queue.put(chunk)
+                    break
+                
+                chunks_to_process.append(chunk)
+                processed_chars += chunk_size
+                processed_chunks += 1
+        except queue.Empty:
+            pass
+        
+        # 批量处理收集到的chunks
+        input_changed = False
+        if chunks_to_process:
+            old_buffer = tab_page.input_buffer.copy()
+            old_cursor = tab_page.input_cursor
+            
+            combined_chunk = ''.join(chunks_to_process)
+            
+            for chunk in chunks_to_process:
+                tab_page.log_std_message(chunk)
+                tab_page.append_capture(chunk)
+            
+            input_start = tab_page.output_text.index(tab_page.input_start_mark)
+            
+            combined_text = (tab_page.partial_output or "") + combined_chunk
+            tab_page.partial_output = ""
+            text, remainder = tab_page.split_incomplete_sequences(combined_text)
+            if remainder:
+                tab_page.partial_output = remainder
+            
+            if text:
+                text, input_start = tab_page.process_control_chars(input_start, text)
+                text = tab_page.strip_control_sequences(text)
+                if text:
+                    tab_page.insert_ansi_text(input_start, text)
+                    try:
+                        new_input_start = tab_page.output_text.index(tab_page.input_start_mark)
+                        if hasattr(tab_page, 'input_line_range'):
+                            tab_page.input_line_range = (new_input_start, tab_page.input_line_range[1])
+                    except:
+                        pass
+            
+            if old_buffer != tab_page.input_buffer or old_cursor != tab_page.input_cursor:
+                input_changed = True
+        
+        if input_changed:
+            tab_page.redraw_input_line()
+        tab_page.output_text.see(tk.END)
+        tab_page.output_text.config(state=tk.NORMAL)
+    
+    def show_test_results(self, tab_page, test_case):
+        """显示测试结果"""
+        # 获取实际输出（从开始到 input_start_mark 之前的所有内容，不包括输入缓冲）
+        try:
+            input_start = tab_page.output_text.index(tab_page.input_start_mark)
+            # 获取从开始到输入标记之前的所有内容
+            actual_display = tab_page.output_text.get("1.0", input_start)
+            # 移除末尾的换行符（如果有）
+            actual_display = actual_display.rstrip('\n')
+        except:
+            # 如果获取失败，获取全部内容
+            actual_display = tab_page.output_text.get("1.0", tk.END).rstrip('\n')
+        
+        # 获取预期输出
+        expected_display = test_case.get('expected_display', '').rstrip('\n')
+        
+        # 显示实际输出
+        self.actual_text.delete("1.0", tk.END)
+        self.actual_text.insert("1.0", actual_display)
+        
+        # 显示预期输出
+        self.expected_text.delete("1.0", tk.END)
+        self.expected_text.insert("1.0", expected_display)
+        
+        # 显示差异
+        self.diff_text.delete("1.0", tk.END)
+        
+        # 规范化比较（移除末尾空白）
+        actual_normalized = actual_display.rstrip()
+        expected_normalized = expected_display.rstrip()
+        
+        if actual_normalized == expected_normalized:
+            self.diff_text.insert("1.0", "✓ 测试通过：实际输出与预期输出一致\n\n")
+            self.diff_text.tag_add("success", "1.0", "1.end")
+            self.diff_text.tag_config("success", foreground="green")
+            self.diff_text.insert(tk.END, "实际输出:\n")
+            self.diff_text.insert(tk.END, actual_display)
+        else:
+            self.diff_text.insert("1.0", "✗ 测试失败：实际输出与预期输出不一致\n\n")
+            self.diff_text.tag_add("error", "1.0", "1.end")
+            self.diff_text.tag_config("error", foreground="red")
+            self.diff_text.insert(tk.END, "实际输出:\n")
+            self.diff_text.insert(tk.END, actual_display)
+            self.diff_text.insert(tk.END, "\n\n预期输出:\n")
+            self.diff_text.insert(tk.END, expected_display)
+            
+            # 显示字符级别的差异
+            self.diff_text.insert(tk.END, "\n\n字符差异分析:\n")
+            self.diff_text.insert(tk.END, f"实际长度: {len(actual_display)}, 预期长度: {len(expected_display)}\n")
+            
+            # 逐字符比较
+            min_len = min(len(actual_display), len(expected_display))
+            diff_count = 0
+            for i in range(min_len):
+                if actual_display[i] != expected_display[i]:
+                    diff_count += 1
+                    if diff_count <= 10:  # 只显示前10个差异
+                        self.diff_text.insert(tk.END, f"位置 {i}: 实际='{repr(actual_display[i])}', 预期='{repr(expected_display[i])}'\n")
+            
+            if len(actual_display) != len(expected_display):
+                self.diff_text.insert(tk.END, f"长度不同: 实际多出 {len(actual_display) - min_len} 个字符，预期多出 {len(expected_display) - min_len} 个字符\n")
+
+
 class DeviceConnectionApp:
     """设备连接应用程序主窗口"""
     
@@ -2885,6 +3324,7 @@ class DeviceConnectionApp:
         toolbar.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(10, 0))
         
         ttk.Button(toolbar, text="关闭当前标签页", command=self.close_current_tab).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="调试模式", command=self.open_debug_window).pack(side=tk.LEFT, padx=5)
         
         # 创建第一个标签页（如果有保存的配置，恢复配置）
         # 尝试加载第一个标签页的配置
@@ -3053,6 +3493,10 @@ class DeviceConnectionApp:
         if tab_page:
             register_send_handler(tab_page.send_command)
             register_active_tab(tab_page)
+    
+    def open_debug_window(self):
+        """打开调试窗口"""
+        debug_window = DebugWindow(self.root, self)
     
     def on_closing(self):
         """窗口关闭时的处理"""

@@ -1,0 +1,28 @@
+[
+    {
+        "name": "测试用例1: 输入123左移4回车",
+        "description": "测试光标左移和退格处理",
+        "inputs": [
+            {"type": "key", "value": "1"},
+            {"type": "key", "value": "2"},
+            {"type": "key", "value": "3"},
+            {"type": "left", "count": 1},
+            {"type": "key", "value": "4"},
+            {"type": "return"}
+        ],
+        "device_outputs": [
+            "1",
+            "2",
+            "3",
+            "\\x08",
+            "43\\x08",
+            "3\\r\\n-/bin",
+            "/bash: 1",
+            "243: not found\\r\\n",
+            "\\033[32mROU",
+            "TER_MPU /\\033[m #"
+        ],
+        "expected_display": "1243\n-/bin/bash: 1243: not found\nROUTER_MPU / #"
+    }
+]
+
