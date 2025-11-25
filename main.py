@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import time
+import subprocess
 
 # 条件导入 serial 和 paramiko（在测试模式下使用模拟模块）
 if '--test' in sys.argv:
@@ -81,6 +82,25 @@ def _require_active_tab():
     if not _current_tab:
         raise RuntimeError("当前没有激活的标签页，请先选择一个连接。")
     return _current_tab
+
+
+def _run_on_ui_thread(tab, func):
+    """确保在UI线程执行操作"""
+    if threading.current_thread() == threading.main_thread():
+        return func()
+    
+    result = {}
+    event = threading.Event()
+    
+    def wrapper():
+        try:
+            result['value'] = func()
+        finally:
+            event.set()
+    
+    tab.root.after(0, wrapper)
+    event.wait()
+    return result.get('value')
 
 
 def send(command):
@@ -225,6 +245,96 @@ def sftp_disconnect():
         return True
     except Exception as e:
         return False
+
+
+def tcp(host, port):
+    """通过TCP网口连接单板"""
+    tab = _require_active_tab()
+    host = str(host).strip()
+    port = str(port).strip()
+    
+    def action():
+        tab.conn_type.set("TCP网口")
+        tab.on_conn_type_changed()
+        tab.host_entry.delete(0, tk.END)
+        tab.host_entry.insert(0, host)
+        tab.port_entry.delete(0, tk.END)
+        tab.port_entry.insert(0, port)
+        tab.connect()
+        return bool(tab.connector and tab.connector.connected)
+    
+    return _run_on_ui_thread(tab, action)
+
+
+def telnet(host, port):
+    """通过Telnet连接单板"""
+    tab = _require_active_tab()
+    host = str(host).strip()
+    port = str(port).strip()
+    
+    def action():
+        tab.conn_type.set("Telnet")
+        tab.on_conn_type_changed()
+        tab.host_entry.delete(0, tk.END)
+        tab.host_entry.insert(0, host)
+        tab.port_entry.delete(0, tk.END)
+        tab.port_entry.insert(0, port)
+        tab.connect()
+        return bool(tab.connector and tab.connector.connected)
+    
+    return _run_on_ui_thread(tab, action)
+
+
+def com(port, baudrate="115200"):
+    """通过串口连接单板"""
+    tab = _require_active_tab()
+    port = str(port).strip()
+    baudrate = str(baudrate).strip()
+    
+    def action():
+        tab.conn_type.set("串口")
+        tab.on_conn_type_changed()
+        tab.refresh_serial_ports()
+        tab.serial_port_combo.set(port)
+        tab.baudrate_combo.set(baudrate)
+        tab.connect()
+        return bool(tab.connector and tab.connector.connected)
+    
+    return _run_on_ui_thread(tab, action)
+
+
+def disconnect():
+    """断开当前连接"""
+    tab = _require_active_tab()
+    
+    def action():
+        tab.disconnect()
+        return True
+    
+    return _run_on_ui_thread(tab, action)
+
+
+def get_ip_address():
+    """获取本机所有IPv4地址，返回列表"""
+    addresses = []
+    try:
+        if sys.platform.startswith('win'):
+            result = subprocess.run(["ipconfig"], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            output = result.stdout
+            pattern = re.compile(r"IPv4 地址[^\d]*(\d+\.\d+\.\d+\.\d+)")
+            addresses = pattern.findall(output)
+            if not addresses:
+                # 兼容英文系统
+                pattern = re.compile(r"IPv4 Address[^\d]*(\d+\.\d+\.\d+\.\d+)")
+                addresses = pattern.findall(output)
+        else:
+            result = subprocess.run(["ifconfig"], capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            output = result.stdout
+            pattern = re.compile(r"inet (?!127\.0\.0\.1)(\d+\.\d+\.\d+\.\d+)")
+            addresses = pattern.findall(output)
+    except Exception:
+        addresses = []
+    return addresses
 
 
 import json
@@ -1124,7 +1234,8 @@ class TabPage:
         
         # 定义可用的函数名列表（用于代码补全）
         self.smart_functions = [
-            "send", "start_receive", "get_receive", "end_receive",
+            "send", "tcp", "telnet", "com", "disconnect", "get_ip_address",
+            "start_receive", "get_receive", "end_receive",
             "send_file", "sftp_connect", "sftp_disconnect",
             "print", "wait"
         ]
@@ -1309,7 +1420,10 @@ class TabPage:
     
     def connect(self):
         """连接设备"""
-        conn_type = self.conn_type.get()
+        conn_type_display = self.conn_type.get()
+        conn_type = conn_type_display.strip()
+        if conn_type in ("TCP网口", "TCP连接", "TCP网路"):
+            conn_type = "TCP"
         success = False
         host = ""
         port = ""
@@ -2425,6 +2539,11 @@ class TabPage:
         help_text = (
             "智能命令编辑支持以下内置函数：\n"
             "• send(cmd): 发送字符串命令到当前连接\n"
+            "• tcp(host, port): 使用TCP网口连接单板\n"
+            "• telnet(host, port): 使用Telnet连接单板\n"
+            "• com(port, baudrate=115200): 使用串口连接单板\n"
+            "• disconnect(): 断开当前连接\n"
+            "• get_ip_address(): 获取当前电脑的IPv4地址列表\n"
             "• start_receive(): 开始捕获单板回显\n"
             "• get_receive(): 获取捕获内容但不结束\n"
             "• end_receive(): 结束捕获并返回文本\n"
@@ -2448,6 +2567,11 @@ class TabPage:
         def worker():
             local_context = {
                 "send": send,
+                "tcp": tcp,
+                "telnet": telnet,
+                "com": com,
+                "disconnect": disconnect,
+                    "get_ip_address": get_ip_address,
                 "start_receive": start_receive,
                 "end_receive": end_receive,
                 "get_receive": get_receive,
@@ -3547,6 +3671,9 @@ class DeviceConnectionApp:
         ttk.Button(toolbar, text="关闭当前标签页", command=self.close_current_tab).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="调试模式", command=self.open_debug_window).pack(side=tk.LEFT, padx=5)
         
+        # 每次启动时都从“单板 1”开始计数
+        self.tab_counter = 1
+        
         # 创建第一个标签页（如果有保存的配置，恢复配置）
         # 尝试加载第一个标签页的配置
         first_tab_config = None
@@ -3555,15 +3682,12 @@ class DeviceConnectionApp:
                 first_tab_config = self.config[tab_name]
                 break
         
+        # 始终使用“单板 1”作为第一个标签页的名称
+        first_tab_name = "单板 1"
         if first_tab_config:
-            # 使用配置中的标签名
-            first_tab_name = list(self.config.keys())[0] if self.config else None
-            if first_tab_name and first_tab_name != "+":
-                self.add_tab(first_tab_name, first_tab_config)
-            else:
-                self.add_tab()
+            self.add_tab(first_tab_name, first_tab_config)
         else:
-            self.add_tab()
+            self.add_tab(first_tab_name)
         
         # 添加"+"标签页
         self.add_plus_tab()
