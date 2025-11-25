@@ -1754,6 +1754,19 @@ class TabPage:
                         # 忽略错误
                         pass
         
+        # 检查并限制最大行数（最多保留1000行）
+        try:
+            line_count = int(self.output_text.index(tk.END).split('.')[0])
+            max_lines = 1000
+            if line_count > max_lines:
+                # 计算需要删除的行数
+                lines_to_delete = line_count - max_lines
+                # 删除最前面的行
+                delete_end = self.output_text.index(f"{lines_to_delete + 1}.0")
+                self.output_text.delete("1.0", delete_end)
+        except:
+            pass
+        
         self.output_text.see(tk.END)
         self.output_text.config(state=tk.NORMAL)
         
@@ -3386,6 +3399,19 @@ class DebugWindow:
                     except Exception as e:
                         # 忽略错误
                         pass
+        
+        # 检查并限制最大行数（最多保留1000行）
+        try:
+            line_count = int(tab_page.output_text.index(tk.END).split('.')[0])
+            max_lines = 1000
+            if line_count > max_lines:
+                # 计算需要删除的行数
+                lines_to_delete = line_count - max_lines
+                # 删除最前面的行
+                delete_end = tab_page.output_text.index(f"{lines_to_delete + 1}.0")
+                tab_page.output_text.delete("1.0", delete_end)
+        except:
+            pass
         
         tab_page.output_text.see(tk.END)
         tab_page.output_text.config(state=tk.NORMAL)
