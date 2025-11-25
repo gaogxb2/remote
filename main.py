@@ -316,25 +316,13 @@ def disconnect():
 
 def get_ip_address():
     """获取本机所有IPv4地址，返回列表"""
-    addresses = []
     try:
-        if sys.platform.startswith('win'):
-            result = subprocess.run(["ipconfig"], capture_output=True, text=True, encoding='utf-8', errors='ignore')
-            output = result.stdout
-            pattern = re.compile(r"IPv4 地址[^\d]*(\d+\.\d+\.\d+\.\d+)")
-            addresses = pattern.findall(output)
-            if not addresses:
-                # 兼容英文系统
-                pattern = re.compile(r"IPv4 Address[^\d]*(\d+\.\d+\.\d+\.\d+)")
-                addresses = pattern.findall(output)
-        else:
-            result = subprocess.run(["ifconfig"], capture_output=True, text=True, encoding='utf-8', errors='ignore')
-            output = result.stdout
-            pattern = re.compile(r"inet (?!127\.0\.0\.1)(\d+\.\d+\.\d+\.\d+)")
-            addresses = pattern.findall(output)
+        hostname = socket.gethostname()
+        ip_list = socket.gethostbyname_ex(hostname)[2]
+        ipv4_only = [ip for ip in ip_list if '.' in ip and not ip.startswith("127.")]
+        return ipv4_only
     except Exception:
-        addresses = []
-    return addresses
+        return []
 
 
 import json
