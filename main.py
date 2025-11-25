@@ -738,6 +738,9 @@ class TabPage:
         self.capture_text = None
         self.capture_lock = threading.Lock()
         self.use_crlf = tk.BooleanVar(value=False)
+        self.input_buffer = []
+        self.input_cursor = 0
+        self.redrawing_input = False
         
         # 智能命令模板
         self.smart_templates = {
@@ -980,6 +983,7 @@ class TabPage:
         self.output_text.insert(tk.END, self.input_prompt)
         self.output_text.mark_set(self.input_start_mark, tk.END)
         self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
+        self.input_line_range = (self.output_text.index(tk.END), self.output_text.index(tk.END))
         self.output_text.config(state=tk.NORMAL)
         
         # 输出控制按钮
@@ -991,6 +995,7 @@ class TabPage:
         # 日志记录开关
         self.log_checkbox = ttk.Checkbutton(output_buttons, text="记录日志", command=self.toggle_log)
         self.log_checkbox.pack(side=tk.LEFT, padx=5)
+        self.input_line_range = (self.output_text.index(tk.END), self.output_text.index(tk.END))
         
         # 命令发送区域
         cmd_send_frame = ttk.LabelFrame(self.frame, text="快速命令发送", padding="10")
@@ -1562,14 +1567,12 @@ class TabPage:
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
 
+        line = ''.join(self.input_buffer)
         try:
-            self.connector.send_command(self.get_line_ending())
+            self.connector.send_command(line)
         except Exception:
             pass
-
-        # 输入由单板回显处理，这里只确保光标在末尾
-        self.output_text.mark_set(tk.INSERT, tk.END)
-        self.output_text.see(tk.END)
+        self.reset_input_buffer()
         return "break"
     
     def on_output_backspace(self, event):
@@ -1581,32 +1584,35 @@ class TabPage:
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
 
-        try:
-            # 发送删除/退格指令给单板（DEL字符）
-            self.connector.send_command('\x7f')
-        except Exception:
-            pass
-
-        # 不在本地删除，等待单板回显处理
+        if self.input_cursor > 0:
+            self.input_cursor -= 1
+            self.input_buffer.pop(self.input_cursor)
+            self.redraw_input_line()
+        elif self.connector:
+            try:
+                self.connector.send_command('\x7f')
+            except Exception:
+                pass
         return "break"
     
     def on_output_delete(self, event):
         """输出框删除事件"""
-        # 确保文本框是可编辑的
+        if not self.connector or not self.connector.connected:
+            messagebox.showwarning("警告", "请先连接设备")
+            return "break"
+
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
-        
-        cursor_pos = self.output_text.index(tk.INSERT)
-        try:
-            input_start = self.output_text.index(self.input_start_mark)
-            if self.output_text.compare(cursor_pos, "<", input_start):
-                # 不允许删除输入区域之前的内容
-                return "break"
-            
-            # 允许默认的删除行为
-            return None
-        except:
-            return None
+
+        if self.input_cursor < len(self.input_buffer):
+            self.input_buffer.pop(self.input_cursor)
+            self.redraw_input_line()
+        elif self.connector:
+            try:
+                self.connector.send_command('\x04')  # Ctrl-D
+            except Exception:
+                pass
+        return "break"
     
     def append_output(self, text):
         """添加输出文本（线程安全）"""
@@ -1624,93 +1630,153 @@ class TabPage:
     
     def check_output_queue(self):
         """检查输出队列并更新显示"""
+        max_chars_per_frame = 10000  # 每帧最多处理的字符数
+        max_chunks_per_frame = 50    # 每帧最多处理的chunk数
+        processed_chars = 0
+        processed_chunks = 0
+        
+        self.output_text.config(state=tk.NORMAL)
+        
+        # 批量收集chunks
+        chunks_to_process = []
         try:
-            while True:
+            while processed_chunks < max_chunks_per_frame:
                 chunk = self.output_queue.get_nowait()
-                self.output_text.config(state=tk.NORMAL)
-                self.append_capture(chunk)
-                # 在输入提示符之前插入输出内容
-                input_start = self.output_text.index(self.input_start_mark)
+                chunk_size = len(chunk)
+                
+                # 如果累计字符数超过限制，停止收集
+                if processed_chars + chunk_size > max_chars_per_frame:
+                    # 将当前chunk放回队列
+                    self.output_queue.put(chunk)
+                    break
+                
+                chunks_to_process.append(chunk)
+                processed_chars += chunk_size
+                processed_chunks += 1
+        except queue.Empty:
+            pass
+        
+        # 批量处理收集到的chunks
+        if chunks_to_process:
+            # 合并所有chunks
+            combined_chunk = ''.join(chunks_to_process)
+            
+            # 记录所有原始chunks到STD输出
+            for chunk in chunks_to_process:
                 self.log_std_message(chunk)
-                combined_text = (self.partial_output or "") + chunk
-                self.partial_output = ""
-                text, remainder = self.split_incomplete_sequences(combined_text)
-                if remainder:
-                    self.partial_output = remainder
-                if not text:
-                    continue
+                self.append_capture(chunk)
+            
+            # 在输入提示符之前插入输出内容
+            input_start = self.output_text.index(self.input_start_mark)
+            
+            # 与partial_output合并
+            combined_text = (self.partial_output or "") + combined_chunk
+            self.partial_output = ""
+            text, remainder = self.split_incomplete_sequences(combined_text)
+            if remainder:
+                self.partial_output = remainder
+            
+            if text:
                 # 先处理控制字符（如BS、DEL）并获取清理后的文本
                 text, input_start = self.process_control_chars(input_start, text)
                 text = self.strip_control_sequences(text)
                 if text:
                     # 处理ANSI颜色编码
                     self.insert_ansi_text(input_start, text)
-                # 更新输入提示符位置
-                self.output_text.mark_set(self.input_start_mark, tk.END)
-                self.output_text.see(tk.END)
-                self.output_text.config(state=tk.NORMAL)
-        except queue.Empty:
-            pass
         
-        self.root.after(100, self.check_output_queue)
+        # 更新输入行和滚动
+        self.redraw_input_line()
+        self.output_text.see(tk.END)
+        self.output_text.config(state=tk.NORMAL)
+        
+        # 如果队列还有数据，缩短下次检查间隔；否则恢复正常间隔
+        if not self.output_queue.empty():
+            self.root.after(10, self.check_output_queue)  # 队列有数据时更频繁检查
+        else:
+            self.root.after(100, self.check_output_queue)  # 队列空时正常间隔
     
     def process_control_chars(self, insert_pos, text):
         """处理控制字符（如BS、DEL）"""
         cleaned_chars = []
-        current_pos = insert_pos
+        current_pos = insert_pos if insert_pos else self.input_line_range[0]
         i = 0
         length = len(text)
         
         while i < length:
             ch = text[i]
-            if ch in ('\x08', '\b', '\x7f'):  # 处理Backspace/DEL或光标左移
-                # 检查典型删除序列：\b \s \b
-                if text[i:i+3] == '\x08 \x08' or text[i:i+3] == '\b \b':
-                    # 真正的删除：移除一个字符并跳过整个序列
-                    if cleaned_chars:
-                        cleaned_chars.pop()
-                    else:
-                        try:
-                            prev_pos = self.output_text.index(f"{current_pos} - 1 chars")
-                            if self.output_text.compare(prev_pos, ">=", "1.0"):
-                                self.output_text.delete(prev_pos, current_pos)
-                                current_pos = prev_pos
-                        except Exception:
-                            pass
-                    i += 3
-                    continue
-                # 仅光标左移
-                try:
-                    prev_pos = self.output_text.index(f"{current_pos} - 1 chars")
-                    if self.output_text.compare(prev_pos, ">=", "1.0"):
-                        current_pos = prev_pos
-                except Exception:
-                    pass
+            if ch in ('\x08', '\b', '\x7f'):
+                if self.input_cursor > 0:
+                    self.input_cursor -= 1
+                    if self.input_cursor < len(self.input_buffer):
+                        self.input_buffer.pop(self.input_cursor)
                 i += 1
                 continue
             if text.startswith('\033[D', i):  # CSI 左移
-                try:
-                    prev_pos = self.output_text.index(f"{current_pos} - 1 chars")
-                    if self.output_text.compare(prev_pos, ">=", "1.0"):
-                        current_pos = prev_pos
-                except Exception:
-                    pass
+                if self.input_cursor > 0:
+                    self.input_cursor -= 1
                 i += 3
                 continue
             if text.startswith('\033[C', i):  # CSI 右移
-                try:
-                    end_pos = self.output_text.index(tk.END)
-                    if self.output_text.compare(current_pos, "<", end_pos):
-                        current_pos = self.output_text.index(f"{current_pos} + 1 chars")
-                except Exception:
-                    pass
+                if self.input_cursor < len(self.input_buffer):
+                    self.input_cursor += 1
                 i += 3
                 continue
+            if ch == '\r':
+                self.input_cursor = 0
+                i += 1
+                continue
+            if ch == '\n':
+                self.input_buffer = []
+                self.input_cursor = 0
+                cleaned_chars.append(ch)
+                i += 1
+                continue
             cleaned_chars.append(ch)
+            if self.input_cursor >= len(self.input_buffer):
+                self.input_buffer.append(ch)
+            else:
+                self.input_buffer.insert(self.input_cursor, ch)
+            self.input_cursor += 1
             i += 1
         
         cleaned_text = ''.join(cleaned_chars)
         return cleaned_text, current_pos
+
+    def redraw_input_line(self):
+        if self.redrawing_input:
+            return
+        self.redrawing_input = True
+        try:
+            self.draw_input_line()
+        finally:
+            self.redrawing_input = False
+
+    def draw_input_line(self):
+        start = self.input_line_range[0]
+        end = self.output_text.index(tk.END)
+        if self.output_text.compare(end, ">=", start):
+            self.output_text.delete(start, end)
+        self.output_text.insert(tk.END, self.input_prompt + ''.join(self.input_buffer))
+        self.input_line_range = (start, self.output_text.index(tk.END))
+        self.output_text.mark_set(self.input_start_mark, start)
+        self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
+        cursor_pos = self.output_text.index(f"{start} + {len(self.input_prompt) + self.input_cursor} chars")
+        self.output_text.mark_set(tk.INSERT, cursor_pos)
+        self.output_text.see(cursor_pos)
+
+    def reset_input_buffer(self):
+        start = self.input_line_range[0]
+        end = self.output_text.index(tk.END)
+        if self.output_text.compare(end, ">=", start):
+            self.output_text.delete(start, end)
+        self.input_buffer = []
+        self.input_cursor = 0
+        self.output_text.insert(tk.END, self.input_prompt)
+        new_pos = self.output_text.index(tk.END)
+        self.input_line_range = (new_pos, new_pos)
+        self.output_text.mark_set(self.input_start_mark, new_pos)
+        self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
+        self.output_text.mark_set(tk.INSERT, new_pos)
 
     def format_raw_text(self, raw_text):
         """将原始文本转换为可读的转义形式"""
