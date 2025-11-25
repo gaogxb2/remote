@@ -1118,6 +1118,23 @@ class TabPage:
         )
         self.smart_text.grid(row=2, column=0, sticky=(tk.N, tk.S, tk.E, tk.W), pady=2)
         self.smart_text.bind("<Tab>", self.smart_text_tab)
+        self.smart_text.bind("<KeyRelease>", self.smart_text_key_release)
+        self.smart_text.bind("<Button-1>", lambda e: self.smart_text_clear_completion())
+        self.smart_text.bind("<FocusOut>", lambda e: self.smart_text_clear_completion())
+        
+        # 定义可用的函数名列表（用于代码补全）
+        self.smart_functions = [
+            "send", "start_receive", "get_receive", "end_receive",
+            "send_file", "sftp_connect", "sftp_disconnect",
+            "print", "wait"
+        ]
+        
+        # 创建补全提示的 tag（灰色、斜体）
+        self.smart_text.tag_config("completion", foreground="#808080", font=("Consolas", 11, "italic"))
+        self.smart_text.tag_bind("completion", "<Button-1>", lambda e: self.smart_text_complete())
+        
+        # 当前补全提示信息
+        self.smart_completion = None  # (start_pos, end_pos, completion_text)
 
         smart_btn_frame = ttk.Frame(smart_frame)
         smart_btn_frame.grid(row=3, column=0, sticky=tk.EW, pady=(2, 0))
@@ -2287,9 +2304,108 @@ class TabPage:
         self.smart_output.config(state=tk.DISABLED)
     
     def smart_text_tab(self, event):
-        """智能命令编辑区的Tab缩进"""
-        self.smart_text.insert(tk.INSERT, "    ")
-        return "break"
+        """智能命令编辑区的Tab键处理：如果有补全提示则补全，否则插入缩进"""
+        if self.smart_completion:
+            # 有补全提示，执行补全
+            self.smart_text_complete()
+            return "break"
+        else:
+            # 没有补全提示，插入缩进
+            self.smart_text.insert(tk.INSERT, "    ")
+            return "break"
+    
+    def smart_text_key_release(self, event):
+        """智能命令编辑区按键释放事件：检测并显示代码补全提示"""
+        # 忽略某些按键（如方向键、功能键等）
+        if event.keysym in ('Up', 'Down', 'Left', 'Right', 'Return', 'Tab', 'Escape', 
+                           'Shift_L', 'Shift_R', 'Control_L', 'Control_R', 
+                           'Alt_L', 'Alt_R', 'Meta_L', 'Meta_R'):
+            # 如果是方向键或回车，清除补全提示
+            if event.keysym in ('Up', 'Down', 'Left', 'Right', 'Return', 'Escape'):
+                self.smart_text_clear_completion()
+            return
+        
+        # 如果是删除键，清除补全提示
+        if event.keysym in ('BackSpace', 'Delete'):
+            self.smart_text_clear_completion()
+            return
+        
+        # 先获取当前光标位置（在清除补全之前，因为清除可能会改变位置）
+        try:
+            current_cursor = self.smart_text.index(tk.INSERT)
+        except:
+            current_cursor = None
+        
+        # 清除之前的补全提示（必须在获取光标位置之后）
+        self.smart_text_clear_completion()
+        
+        # 如果光标位置发生了变化（因为清除了补全），使用新的光标位置
+        try:
+            if current_cursor:
+                # 确保光标在正确位置
+                self.smart_text.mark_set(tk.INSERT, current_cursor)
+            cursor_pos = self.smart_text.index(tk.INSERT)
+            line_start = self.smart_text.index(f"{cursor_pos} linestart")
+            
+            # 获取当前行的文本（从行首到光标位置）
+            line_text = self.smart_text.get(line_start, cursor_pos)
+            
+            # 使用正则表达式匹配函数名（字母、数字、下划线）
+            import re
+            # 匹配最后一个可能的函数名（从字母或下划线开始）
+            match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)$', line_text)
+            if match:
+                partial_name = match.group(1)
+                
+                # 查找匹配的函数名
+                matches = [func for func in self.smart_functions if func.startswith(partial_name)]
+                
+                if matches and matches[0] != partial_name:
+                    # 找到匹配的函数名，显示补全提示
+                    completion = matches[0]
+                    completion_text = completion[len(partial_name):]
+                    
+                    if completion_text:
+                        # 在光标位置插入灰色补全提示
+                        self.smart_text.insert(tk.INSERT, completion_text, "completion")
+                        # 记录补全信息
+                        end_pos = self.smart_text.index(tk.INSERT)
+                        self.smart_completion = (cursor_pos, end_pos, completion_text)
+                        # 将光标移回插入位置（白色和灰色之间）
+                        self.smart_text.mark_set(tk.INSERT, cursor_pos)
+        except:
+            # 如果出错，清除补全提示
+            self.smart_text_clear_completion()
+    
+    def smart_text_clear_completion(self):
+        """清除代码补全提示（通过 tag 删除，更可靠）"""
+        if self.smart_completion:
+            # 通过 tag 删除所有带有 "completion" tag 的文本
+            # 这样即使中间插入了字符，也能正确删除补全提示
+            try:
+                ranges = self.smart_text.tag_ranges("completion")
+                # ranges 是成对的 (start1, end1, start2, end2, ...)
+                for i in range(0, len(ranges), 2):
+                    if i + 1 < len(ranges):
+                        start = ranges[i]
+                        end = ranges[i + 1]
+                        self.smart_text.delete(start, end)
+            except:
+                pass
+            self.smart_completion = None
+    
+    def smart_text_complete(self):
+        """执行代码补全"""
+        if self.smart_completion:
+            start_pos, end_pos, completion_text = self.smart_completion
+            try:
+                # 删除补全提示（灰色文本）
+                self.smart_text.delete(start_pos, end_pos)
+                # 插入实际的补全文本（正常颜色）
+                self.smart_text.insert(start_pos, completion_text)
+            except:
+                pass
+            self.smart_completion = None
     
     def show_smart_help(self):
         """显示智能命令功能帮助"""
