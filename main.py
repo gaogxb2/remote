@@ -10,15 +10,57 @@ import threading
 import queue
 import socket
 import telnetlib
-import serial
-import serial.tools.list_ports
 from datetime import datetime
 import sys
 import os
-import paramiko
 from pathlib import Path
 import re
 import time
+
+# 条件导入 serial 和 paramiko（在测试模式下使用模拟模块）
+if '--test' in sys.argv:
+    # 测试模式：创建模拟模块
+    import types
+    mock_serial = types.ModuleType('serial')
+    mock_serial.Serial = type('Serial', (), {
+        '__init__': lambda self, *args, **kwargs: None,
+        'write': lambda self, data: None,
+        'read': lambda self, size=1: b'',
+        'close': lambda self: None,
+        'is_open': True,
+        'EIGHTBITS': 8,
+        'PARITY_NONE': 'N',
+        'STOPBITS_ONE': 1,
+    })
+    mock_serial.SerialTimeoutException = Exception
+    mock_serial.SerialException = Exception
+    
+    mock_serial_tools = types.ModuleType('serial.tools')
+    mock_list_ports = types.ModuleType('serial.tools.list_ports')
+    mock_list_ports.comports = lambda: []
+    mock_serial_tools.list_ports = mock_list_ports
+    
+    # 将 tools 添加到 serial 模块
+    mock_serial.tools = mock_serial_tools
+    
+    sys.modules['serial'] = mock_serial
+    sys.modules['serial.tools'] = mock_serial_tools
+    sys.modules['serial.tools.list_ports'] = mock_list_ports
+    
+    mock_paramiko = types.ModuleType('paramiko')
+    mock_paramiko.SSHClient = type('SSHClient', (), {
+        '__init__': lambda self: None,
+        'set_missing_host_key_policy': lambda self, policy: None,
+        'connect': lambda self, *args, **kwargs: None,
+        'open_sftp': lambda self: None,
+        'close': lambda self: None,
+    })
+    mock_paramiko.AutoAddPolicy = type('AutoAddPolicy', (), {})
+    sys.modules['paramiko'] = mock_paramiko
+
+import serial
+import serial.tools.list_ports
+import paramiko
 _current_send_handler = None
 _current_tab = None
 
@@ -1606,7 +1648,7 @@ class TabPage:
                 pass
     
     def check_output_queue(self):
-        """检查输出队列并更新显示"""
+        """检查输出队列并更新显示 - 简化版本：单板返回什么就显示什么，只处理ANSI颜色编码"""
         max_chars_per_frame = 10000  # 每帧最多处理的字符数
         max_chunks_per_frame = 50    # 每帧最多处理的chunk数
         processed_chars = 0
@@ -1634,12 +1676,7 @@ class TabPage:
             pass
         
         # 批量处理收集到的chunks
-        input_changed = False
         if chunks_to_process:
-            # 保存输入缓冲和光标位置的状态
-            old_buffer = self.input_buffer.copy()
-            old_cursor = self.input_cursor
-            
             # 合并所有chunks
             combined_chunk = ''.join(chunks_to_process)
             
@@ -1648,10 +1685,7 @@ class TabPage:
                 self.log_std_message(chunk)
                 self.append_capture(chunk)
             
-            # 在输入提示符之前插入输出内容
-            input_start = self.output_text.index(self.input_start_mark)
-            
-            # 与partial_output合并
+            # 与partial_output合并（处理不完整的ANSI序列）
             combined_text = (self.partial_output or "") + combined_chunk
             self.partial_output = ""
             text, remainder = self.split_incomplete_sequences(combined_text)
@@ -1659,50 +1693,50 @@ class TabPage:
                 self.partial_output = remainder
             
             if text:
-                # 先统计退格数量，处理退格（从已显示的文本中删除字符）
-                # 注意：\x08 和 \b 是同一个字符，不要重复统计
-                backspace_count = 0
-                for ch in text:
-                    if ch in ('\x08', '\b', '\x7f'):
-                        backspace_count += 1
-                if backspace_count > 0:
-                    # 从 input_start 之前删除字符
-                    try:
-                        # 获取 input_start 之前的内容
-                        text_before_input = self.output_text.get("1.0", input_start)
-                        if len(text_before_input) >= backspace_count:
-                            # 删除最后 backspace_count 个字符
-                            delete_start = self.output_text.index(f"{input_start} - {backspace_count} chars")
-                            self.output_text.delete(delete_start, input_start)
-                            # 更新 input_start 位置
-                            input_start = self.output_text.index(self.input_start_mark)
-                    except:
-                        pass
-                
-                # 处理控制字符（如BS、DEL）并获取清理后的文本
-                text, input_start = self.process_control_chars(input_start, text)
+                # 移除清除屏幕的控制序列（如 \033[J, \033[K）
                 text = self.strip_control_sequences(text)
-                if text:
-                    # 处理ANSI颜色编码
-                    self.insert_ansi_text(input_start, text)
-                    # 插入新输出后，更新 input_line_range 的起始位置
-                    # input_start_mark 会自动保持在正确位置（LEFT gravity）
-                    # 但需要更新 input_line_range 以反映新的输入行位置
+                
+                # 处理回车符：将 \r\n 或单独的 \r 转换为 \n
+                text = text.replace('\r\n', '\n').replace('\r', '\n')
+                
+                # 处理退格字符：按照单板规则处理
+                # 单板返回格式：[新输入][光标后的内容][退格数量等于光标后内容长度]
+                # 例如：光标在2和3中间，输入4，返回 "43\x08"（4是新输入，3是光标后的内容，\x08是退格）
+                # 处理逻辑：先插入所有文本（包含新输入和光标后的内容），然后退格删除光标后的内容
+                
+                # 从文本末尾提取退格字符，统计退格数量
+                backspace_count = 0
+                text_without_backspace = text
+                # 从末尾开始，连续统计退格字符
+                while text_without_backspace and text_without_backspace[-1] in ('\x08', '\b', '\x7f'):
+                    backspace_count += 1
+                    text_without_backspace = text_without_backspace[:-1]
+                
+                # 先插入文本（包含新输入和光标后的内容）
+                if text_without_backspace:
+                    insert_pos = self.output_text.index(tk.END)
+                    self.insert_ansi_text(insert_pos, text_without_backspace)
+                
+                # 然后处理退格：删除刚插入的文本末尾的字符（数量等于光标后内容长度，即退格数量）
+                if backspace_count > 0:
                     try:
-                        new_input_start = self.output_text.index(self.input_start_mark)
-                        if hasattr(self, 'input_line_range'):
-                            # 保持 input_line_range 的结束位置不变，只更新起始位置
-                            self.input_line_range = (new_input_start, self.input_line_range[1])
-                    except:
+                        # 使用 end-1c 获取最后一个字符的位置（而不是末尾之后的位置）
+                        current_end = self.output_text.index("end-1c")
+                        if self.output_text.compare(current_end, ">=", "1.0"):
+                            # 删除末尾的字符（数量等于退格数量）
+                            delete_count = min(backspace_count, 10000)  # 限制删除数量
+                            # 计算删除起始位置：从最后一个字符往前数 delete_count 个字符
+                            if self.output_text.compare(f"{current_end} - {delete_count} chars", ">=", "1.0"):
+                                delete_start = self.output_text.index(f"{current_end} - {delete_count} chars")
+                            else:
+                                delete_start = "1.0"
+                            # 删除范围：从 delete_start 到 current_end 之后（包含 current_end）
+                            delete_end = self.output_text.index(f"{current_end} + 1 chars")
+                            self.output_text.delete(delete_start, delete_end)
+                    except Exception as e:
+                        # 忽略错误
                         pass
-            
-            # 检查输入缓冲或光标是否改变
-            if old_buffer != self.input_buffer or old_cursor != self.input_cursor:
-                input_changed = True
         
-        # 只在输入改变时才重绘输入行
-        if input_changed:
-            self.redraw_input_line()
         self.output_text.see(tk.END)
         self.output_text.config(state=tk.NORMAL)
         
@@ -1776,20 +1810,52 @@ class TabPage:
             # 如果标记不存在，使用 input_line_range
             start = self.input_line_range[0] if hasattr(self, 'input_line_range') and self.input_line_range else self.output_text.index(tk.END)
         
-        end = self.output_text.index(tk.END)
-        if self.output_text.compare(end, ">", start):
-            self.output_text.delete(start, end)
+        # 只删除输入行的内容（使用 input_line_range 的结束位置）
+        # 而不是从 start 到 END 的所有内容（这会删除输出文本）
+        if hasattr(self, 'input_line_range') and self.input_line_range:
+            input_start_range, input_end_range = self.input_line_range
+            try:
+                # 确保 range 有效，并且只删除输入行的内容
+                if self.output_text.compare(input_start_range, "<=", input_end_range):
+                    # 检查 input_end_range 是否在 start 之后
+                    if self.output_text.compare(input_end_range, ">", start):
+                        # 删除输入行的内容
+                        self.output_text.delete(start, input_end_range)
+                        # 更新 start 为删除后的位置（实际上 start 不变，因为 LEFT gravity）
+                    elif self.output_text.compare(input_end_range, "==", start):
+                        # 输入行为空，不需要删除
+                        pass
+                    else:
+                        # input_end_range 在 start 之前，说明 range 无效，只删除从 start 开始的内容
+                        # 但这种情况不应该发生
+                        pass
+            except:
+                # 如果 range 无效，尝试删除从 start 到 END 的内容
+                # 但这种情况不应该发生
+                end = self.output_text.index(tk.END)
+                if self.output_text.compare(end, ">", start):
+                    self.output_text.delete(start, end)
+        else:
+            # 如果没有 input_line_range，删除从 start 到 END 的内容
+            end = self.output_text.index(tk.END)
+            if self.output_text.compare(end, ">", start):
+                self.output_text.delete(start, end)
         
         # 只插入输入缓冲内容（不插入提示符，由单板返回）
         input_content = ''.join(self.input_buffer)
         if input_content:
             self.output_text.insert(start, input_content)
         
-        # 更新 input_line_range
-        new_end = self.output_text.index(tk.END)
+        # 更新 input_line_range（输入行的范围）
+        # 输入行结束位置 = start + len(input_content)
+        if input_content:
+            new_end = self.output_text.index(f"{start} + {len(input_content)} chars")
+        else:
+            new_end = start
         self.input_line_range = (start, new_end)
         
-        # 更新 input_start_mark
+        # 更新 input_start_mark（保持 LEFT gravity）
+        # 注意：由于 LEFT gravity，mark 的位置不会因为插入而改变
         self.output_text.mark_set(self.input_start_mark, start)
         self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
         
@@ -3083,24 +3149,24 @@ class DebugWindow:
         device_outputs = test_case.get('device_outputs', [])
         
         # 先处理所有输入（模拟用户操作）
+        # 注意：根据新的简化逻辑，输入应该由设备返回显示，不在本地显示
+        # 所以这里只更新 input_buffer，不调用 redraw_input_line()
         for input_item in inputs:
             if input_item['type'] == 'key':
-                # 模拟按键
+                # 模拟按键（只更新缓冲，不显示）
                 tab_page.input_buffer.append(input_item['value'])
                 tab_page.input_cursor = len(tab_page.input_buffer)
-                tab_page.redraw_input_line()
                 self.window.update()
                 time.sleep(0.01)
             elif input_item['type'] == 'left':
-                # 模拟光标左移
+                # 模拟光标左移（只更新光标位置，不显示）
                 for _ in range(input_item.get('count', 1)):
                     if tab_page.input_cursor > 0:
                         tab_page.input_cursor -= 1
-                tab_page.redraw_input_line()
                 self.window.update()
                 time.sleep(0.01)
             elif input_item['type'] == 'return':
-                # 模拟回车
+                # 模拟回车（清空缓冲，不显示）
                 line = ''.join(tab_page.input_buffer)
                 tab_page.reset_input_buffer()
                 self.window.update()
@@ -3108,12 +3174,13 @@ class DebugWindow:
         
         # 然后处理所有设备输出（模拟设备响应）
         # 设备输出可能分多次到达，需要逐个处理
-        for device_output in device_outputs:
+        for idx, device_output in enumerate(device_outputs):
             if device_output:
                 # 将输出放入队列
                 tab_page.output_queue.put(device_output)
                 # 直接处理输出队列（同步处理，不使用 after）
-                self.process_output_queue_sync(tab_page)
+                # 每次只处理一个 chunk，避免重复处理
+                self.process_output_queue_sync(tab_page, max_chunks=1)
                 # 更新界面
                 self.window.update()
                 time.sleep(0.01)  # 短暂延迟确保处理完成
@@ -3124,10 +3191,12 @@ class DebugWindow:
             self.window.update()
             time.sleep(0.01)
     
-    def process_output_queue_sync(self, tab_page):
-        """同步处理输出队列（用于调试模式）"""
+    def process_output_queue_sync(self, tab_page, max_chunks=1):
+        """同步处理输出队列（用于调试模式）
+        max_chunks: 每次处理的最大chunk数量，默认为1以避免重复处理
+        """
         max_chars_per_frame = 10000
-        max_chunks_per_frame = 50
+        max_chunks_per_frame = max_chunks
         processed_chars = 0
         processed_chunks = 0
         
@@ -3150,20 +3219,15 @@ class DebugWindow:
         except queue.Empty:
             pass
         
-        # 批量处理收集到的chunks
-        input_changed = False
+        # 批量处理收集到的chunks - 简化版本：单板返回什么就显示什么，只处理ANSI颜色编码
         if chunks_to_process:
-            old_buffer = tab_page.input_buffer.copy()
-            old_cursor = tab_page.input_cursor
-            
             combined_chunk = ''.join(chunks_to_process)
             
             for chunk in chunks_to_process:
                 tab_page.log_std_message(chunk)
                 tab_page.append_capture(chunk)
             
-            input_start = tab_page.output_text.index(tab_page.input_start_mark)
-            
+            # 与partial_output合并（处理不完整的ANSI序列）
             combined_text = (tab_page.partial_output or "") + combined_chunk
             tab_page.partial_output = ""
             text, remainder = tab_page.split_incomplete_sequences(combined_text)
@@ -3171,37 +3235,60 @@ class DebugWindow:
                 tab_page.partial_output = remainder
             
             if text:
-                text, input_start = tab_page.process_control_chars(input_start, text)
+                # 移除清除屏幕的控制序列（如 \033[J, \033[K）
                 text = tab_page.strip_control_sequences(text)
-                if text:
-                    tab_page.insert_ansi_text(input_start, text)
+                
+                # 处理回车符：将 \r\n 或单独的 \r 转换为 \n
+                text = text.replace('\r\n', '\n').replace('\r', '\n')
+                
+                # 处理退格字符：按照单板规则处理
+                # 单板返回格式：[新输入][光标后的内容][退格数量等于光标后内容长度]
+                # 例如：光标在2和3中间，输入4，返回 "43\x08"（4是新输入，3是光标后的内容，\x08是退格）
+                # 处理逻辑：先插入所有文本（包含新输入和光标后的内容），然后退格删除光标后的内容
+                
+                # 从文本末尾提取退格字符，统计退格数量
+                backspace_count = 0
+                text_without_backspace = text
+                # 从末尾开始，连续统计退格字符
+                while text_without_backspace and text_without_backspace[-1] in ('\x08', '\b', '\x7f'):
+                    backspace_count += 1
+                    text_without_backspace = text_without_backspace[:-1]
+                
+                # 先插入文本（包含新输入和光标后的内容）
+                if text_without_backspace:
+                    insert_pos = tab_page.output_text.index(tk.END)
+                    tab_page.insert_ansi_text(insert_pos, text_without_backspace)
+                
+                # 然后处理退格：删除刚插入的文本末尾的字符（数量等于光标后内容长度，即退格数量）
+                if backspace_count > 0:
                     try:
-                        new_input_start = tab_page.output_text.index(tab_page.input_start_mark)
-                        if hasattr(tab_page, 'input_line_range'):
-                            tab_page.input_line_range = (new_input_start, tab_page.input_line_range[1])
-                    except:
+                        # 使用 end-1c 获取最后一个字符的位置（而不是末尾之后的位置）
+                        current_end = tab_page.output_text.index("end-1c")
+                        if tab_page.output_text.compare(current_end, ">=", "1.0"):
+                            # 删除末尾的字符（数量等于退格数量）
+                            delete_count = min(backspace_count, 10000)  # 限制删除数量
+                            # 计算删除起始位置：从最后一个字符往前数 delete_count 个字符
+                            if tab_page.output_text.compare(f"{current_end} - {delete_count} chars", ">=", "1.0"):
+                                delete_start = tab_page.output_text.index(f"{current_end} - {delete_count} chars")
+                            else:
+                                delete_start = "1.0"
+                            # 删除范围：从 delete_start 到 current_end 之后（包含 current_end）
+                            delete_end = tab_page.output_text.index(f"{current_end} + 1 chars")
+                            tab_page.output_text.delete(delete_start, delete_end)
+                    except Exception as e:
+                        # 忽略错误
                         pass
-            
-            if old_buffer != tab_page.input_buffer or old_cursor != tab_page.input_cursor:
-                input_changed = True
         
-        if input_changed:
-            tab_page.redraw_input_line()
         tab_page.output_text.see(tk.END)
         tab_page.output_text.config(state=tk.NORMAL)
     
     def show_test_results(self, tab_page, test_case):
         """显示测试结果"""
-        # 获取实际输出（从开始到 input_start_mark 之前的所有内容，不包括输入缓冲）
+        # 获取实际输出（所有内容，因为现在单板返回什么就显示什么）
         try:
-            input_start = tab_page.output_text.index(tab_page.input_start_mark)
-            # 获取从开始到输入标记之前的所有内容
-            actual_display = tab_page.output_text.get("1.0", input_start)
-            # 移除末尾的换行符（如果有）
-            actual_display = actual_display.rstrip('\n')
-        except:
-            # 如果获取失败，获取全部内容
             actual_display = tab_page.output_text.get("1.0", tk.END).rstrip('\n')
+        except:
+            actual_display = ""
         
         # 获取预期输出
         expected_display = test_case.get('expected_display', '').rstrip('\n')
@@ -3509,6 +3596,141 @@ class DeviceConnectionApp:
         self.root.destroy()
 
 
+def run_test_cases():
+    """运行测试用例（类似 test_run.py 的功能）"""
+    import json
+    import time
+    
+    # 加载测试用例
+    test_file = "test_cases.json"
+    if not os.path.exists(test_file):
+        print(f"测试用例文件不存在: {test_file}")
+        return
+    
+    with open(test_file, 'r', encoding='utf-8') as f:
+        test_cases = json.load(f)
+    
+    # 创建根窗口和TabPage（隐藏窗口）
+    root = tk.Tk()
+    root.withdraw()
+    
+    # 创建应用实例
+    try:
+        app = DeviceConnectionApp(root)
+    except Exception as e:
+        print(f"创建应用实例失败: {e}")
+        import traceback
+        traceback.print_exc()
+        root.destroy()
+        return
+    
+    # 创建临时的 DebugWindow 实例用于解码
+    temp_debug = DebugWindow(root, app)
+    temp_debug.window.destroy()  # 销毁窗口，只保留实例用于调用方法
+    
+    # 解码转义序列
+    for test_case in test_cases:
+        if 'device_outputs' in test_case:
+            test_case['device_outputs'] = [
+                temp_debug.decode_escape_sequences(output) 
+                for output in test_case['device_outputs']
+            ]
+        if 'expected_display' in test_case:
+            test_case['expected_display'] = temp_debug.decode_escape_sequences(
+                test_case['expected_display']
+            )
+    
+    # 获取第一个标签页
+    tab_name = list(app.tabs.keys())[0]
+    tab_page = app.tabs[tab_name]
+    
+    # 创建模拟的 connector
+    class MockConnector:
+        def __init__(self):
+            self.connected = True
+        def send_command(self, cmd):
+            pass
+    
+    tab_page.connector = MockConnector()
+    
+    # 运行第一个测试用例
+    test_case = test_cases[0]
+    print("=" * 70)
+    print(f"测试用例: {test_case.get('name', '测试用例')}")
+    print("=" * 70)
+    print()
+    
+    # 清空输出
+    tab_page.clear_output()
+    
+    # 执行测试用例（使用 DebugWindow 中的方法）
+    debug_window = DebugWindow(root, app)
+    debug_window.execute_test_case(tab_page, test_case)
+    
+    # 等待处理完成
+    root.update()
+    time.sleep(0.1)
+    
+    # 获取实际输出
+    try:
+        input_start = tab_page.output_text.index(tab_page.input_start_mark)
+        actual_display = tab_page.output_text.get("1.0", input_start)
+        actual_display = actual_display.rstrip('\n')
+    except:
+        actual_display = tab_page.output_text.get("1.0", tk.END).rstrip('\n')
+    
+    # 获取预期输出
+    expected_display = test_case.get('expected_display', '').rstrip('\n')
+    
+    # 显示结果
+    print("实际输出:")
+    print("-" * 70)
+    print(repr(actual_display))
+    print()
+    print("实际输出 (可读形式):")
+    print("-" * 70)
+    print(actual_display)
+    print()
+    
+    print("预期输出:")
+    print("-" * 70)
+    print(repr(expected_display))
+    print()
+    print("预期输出 (可读形式):")
+    print("-" * 70)
+    print(expected_display)
+    print()
+    
+    print("=" * 70)
+    
+    # 比较结果
+    actual_normalized = actual_display.rstrip()
+    expected_normalized = expected_display.rstrip()
+    
+    if actual_normalized == expected_normalized:
+        print("✓ 测试通过：实际输出与预期输出一致")
+    else:
+        print("✗ 测试失败：实际输出与预期输出不一致")
+        print()
+        print("字符差异分析:")
+        print(f"实际长度: {len(actual_display)}, 预期长度: {len(expected_display)}")
+        
+        # 逐字符比较
+        min_len = min(len(actual_display), len(expected_display))
+        diff_count = 0
+        for i in range(min_len):
+            if actual_display[i] != expected_display[i]:
+                diff_count += 1
+                if diff_count <= 20:
+                    print(f"位置 {i}: 实际='{repr(actual_display[i])}', 预期='{repr(expected_display[i])}'")
+        
+        if len(actual_display) != len(expected_display):
+            print(f"长度不同: 实际多出 {len(actual_display) - min_len} 个字符，预期多出 {len(expected_display) - min_len} 个字符")
+    
+    print("=" * 70)
+    root.destroy()
+
+
 def main():
     # Windows兼容性设置
     if sys.platform == 'win32':
@@ -3519,6 +3741,11 @@ def main():
             sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
         except:
             pass
+    
+    # 检查是否以测试模式运行
+    if len(sys.argv) > 1 and sys.argv[1] == '--test':
+        run_test_cases()
+        return
     
     try:
         root = tk.Tk()
