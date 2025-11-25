@@ -959,8 +959,8 @@ class TabPage:
         # 配置ANSI颜色tag
         self.setup_ansi_colors()
         
-        # 初始化输入提示符
-        self.input_prompt = "> "
+        # 初始化输入提示符（不使用硬编码，由单板返回的实际提示符决定）
+        self.input_prompt = ""
         self.input_start_mark = "input_start"
         self.input_enabled = True  # 永远允许输入
         
@@ -978,9 +978,8 @@ class TabPage:
         # 用于跟踪拖动状态
         self.dragging = False
         
-        # 初始化输入区域
+        # 初始化输入区域（不插入提示符，等待单板返回）
         self.output_text.config(state=tk.NORMAL)
-        self.output_text.insert(tk.END, self.input_prompt)
         self.output_text.mark_set(self.input_start_mark, tk.END)
         self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
         self.input_line_range = (self.output_text.index(tk.END), self.output_text.index(tk.END))
@@ -1368,33 +1367,11 @@ class TabPage:
                 return ""
     
     def add_input_prompt(self):
-        """添加输入提示符"""
+        """更新输入区域标记（不再插入提示符，由单板返回）"""
         self.output_text.config(state=tk.NORMAL)
-        prompt_appended = False
-        try:
-            end_pos = self.output_text.index(tk.END)
-            if end_pos != "1.0":
-                last_line_start = self.output_text.index(f"{end_pos} linestart")
-                last_line = self.output_text.get(last_line_start, end_pos)
-                if not last_line.rstrip().endswith(self.input_prompt.rstrip()):
-                    self.output_text.insert(tk.END, self.input_prompt)
-                    prompt_appended = True
-            else:
-                self.output_text.insert(tk.END, self.input_prompt)
-                prompt_appended = True
-        except Exception:
-            self.output_text.insert(tk.END, self.input_prompt)
-            prompt_appended = True
-        
-        # 计算提示符起始位置
-        if prompt_appended:
-            prompt_start = self.output_text.index(f"{tk.END} - {len(self.input_prompt)} chars")
-        else:
-            end_pos = self.output_text.index(tk.END)
-            prompt_start = self.output_text.index(f"{end_pos} - {len(self.input_prompt)} chars")
-        
-        # 设置输入区域标记到提示符起点
-        self.output_text.mark_set(self.input_start_mark, prompt_start)
+        # 设置输入区域标记到当前末尾（单板返回的提示符之后）
+        end_pos = self.output_text.index(tk.END)
+        self.output_text.mark_set(self.input_start_mark, end_pos)
         self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
         # 将光标移动到输入区域末尾
         self.output_text.mark_set(tk.INSERT, tk.END)
@@ -1657,7 +1634,12 @@ class TabPage:
             pass
         
         # 批量处理收集到的chunks
+        input_changed = False
         if chunks_to_process:
+            # 保存输入缓冲和光标位置的状态
+            old_buffer = self.input_buffer.copy()
+            old_cursor = self.input_cursor
+            
             # 合并所有chunks
             combined_chunk = ''.join(chunks_to_process)
             
@@ -1683,9 +1665,24 @@ class TabPage:
                 if text:
                     # 处理ANSI颜色编码
                     self.insert_ansi_text(input_start, text)
+                    # 插入新输出后，更新 input_line_range 的起始位置
+                    # input_start_mark 会自动保持在正确位置（LEFT gravity）
+                    # 但需要更新 input_line_range 以反映新的输入行位置
+                    try:
+                        new_input_start = self.output_text.index(self.input_start_mark)
+                        if hasattr(self, 'input_line_range'):
+                            # 保持 input_line_range 的结束位置不变，只更新起始位置
+                            self.input_line_range = (new_input_start, self.input_line_range[1])
+                    except:
+                        pass
+            
+            # 检查输入缓冲或光标是否改变
+            if old_buffer != self.input_buffer or old_cursor != self.input_cursor:
+                input_changed = True
         
-        # 更新输入行和滚动
-        self.redraw_input_line()
+        # 只在输入改变时才重绘输入行
+        if input_changed:
+            self.redraw_input_line()
         self.output_text.see(tk.END)
         self.output_text.config(state=tk.NORMAL)
         
@@ -1752,15 +1749,32 @@ class TabPage:
             self.redrawing_input = False
 
     def draw_input_line(self):
-        start = self.input_line_range[0]
+        # 使用 input_start_mark 作为输入行的起始位置，更可靠
+        try:
+            start = self.output_text.index(self.input_start_mark)
+        except:
+            # 如果标记不存在，使用 input_line_range
+            start = self.input_line_range[0] if hasattr(self, 'input_line_range') and self.input_line_range else self.output_text.index(tk.END)
+        
         end = self.output_text.index(tk.END)
-        if self.output_text.compare(end, ">=", start):
+        if self.output_text.compare(end, ">", start):
             self.output_text.delete(start, end)
-        self.output_text.insert(tk.END, self.input_prompt + ''.join(self.input_buffer))
-        self.input_line_range = (start, self.output_text.index(tk.END))
+        
+        # 只插入输入缓冲内容（不插入提示符，由单板返回）
+        input_content = ''.join(self.input_buffer)
+        if input_content:
+            self.output_text.insert(start, input_content)
+        
+        # 更新 input_line_range
+        new_end = self.output_text.index(tk.END)
+        self.input_line_range = (start, new_end)
+        
+        # 更新 input_start_mark
         self.output_text.mark_set(self.input_start_mark, start)
         self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
-        cursor_pos = self.output_text.index(f"{start} + {len(self.input_prompt) + self.input_cursor} chars")
+        
+        # 设置光标位置（不包含提示符长度）
+        cursor_pos = self.output_text.index(f"{start} + {self.input_cursor} chars")
         self.output_text.mark_set(tk.INSERT, cursor_pos)
         self.output_text.see(cursor_pos)
 
@@ -1771,7 +1785,7 @@ class TabPage:
             self.output_text.delete(start, end)
         self.input_buffer = []
         self.input_cursor = 0
-        self.output_text.insert(tk.END, self.input_prompt)
+        # 不插入提示符，等待单板返回
         new_pos = self.output_text.index(tk.END)
         self.input_line_range = (new_pos, new_pos)
         self.output_text.mark_set(self.input_start_mark, new_pos)
