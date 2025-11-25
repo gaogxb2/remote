@@ -1803,51 +1803,43 @@ class TabPage:
             self.redrawing_input = False
 
     def draw_input_line(self):
-        # 使用 input_start_mark 作为输入行的起始位置，更可靠
+        """绘制输入行（根据新的简化逻辑，不删除输出内容，只更新输入行显示）"""
+        # 根据新的简化逻辑，输入应该由单板返回显示
+        # 但为了用户体验，我们仍然在本地显示输入缓冲（作为预览）
+        # 注意：这个函数不应该删除任何输出内容
+        
+        # 使用 input_start_mark 作为输入行的起始位置
         try:
             start = self.output_text.index(self.input_start_mark)
         except:
-            # 如果标记不存在，使用 input_line_range
-            start = self.input_line_range[0] if hasattr(self, 'input_line_range') and self.input_line_range else self.output_text.index(tk.END)
+            # 如果标记不存在，使用末尾
+            start = self.output_text.index(tk.END)
+            if hasattr(self, 'input_start_mark'):
+                self.output_text.mark_set(self.input_start_mark, start)
+                self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
         
-        # 只删除输入行的内容（使用 input_line_range 的结束位置）
-        # 而不是从 start 到 END 的所有内容（这会删除输出文本）
+        # 只删除输入行的内容（如果有 input_line_range 且有效）
+        # 注意：不能删除输出内容，只能删除之前绘制的输入行内容
         if hasattr(self, 'input_line_range') and self.input_line_range:
             input_start_range, input_end_range = self.input_line_range
             try:
-                # 确保 range 有效，并且只删除输入行的内容
-                if self.output_text.compare(input_start_range, "<=", input_end_range):
-                    # 检查 input_end_range 是否在 start 之后
-                    if self.output_text.compare(input_end_range, ">", start):
-                        # 删除输入行的内容
-                        self.output_text.delete(start, input_end_range)
-                        # 更新 start 为删除后的位置（实际上 start 不变，因为 LEFT gravity）
-                    elif self.output_text.compare(input_end_range, "==", start):
-                        # 输入行为空，不需要删除
-                        pass
-                    else:
-                        # input_end_range 在 start 之前，说明 range 无效，只删除从 start 开始的内容
-                        # 但这种情况不应该发生
-                        pass
+                # 确保 range 有效，并且只删除输入行的内容（不能超过 start 到 END 的范围）
+                if (self.output_text.compare(input_start_range, ">=", start) and 
+                    self.output_text.compare(input_end_range, ">", input_start_range)):
+                    # 只删除输入行的内容（从 input_start_range 到 input_end_range）
+                    self.output_text.delete(input_start_range, input_end_range)
+                    # 更新 start 为删除后的位置
+                    start = input_start_range
             except:
-                # 如果 range 无效，尝试删除从 start 到 END 的内容
-                # 但这种情况不应该发生
-                end = self.output_text.index(tk.END)
-                if self.output_text.compare(end, ">", start):
-                    self.output_text.delete(start, end)
-        else:
-            # 如果没有 input_line_range，删除从 start 到 END 的内容
-            end = self.output_text.index(tk.END)
-            if self.output_text.compare(end, ">", start):
-                self.output_text.delete(start, end)
+                # 如果 range 无效，不删除任何内容
+                pass
         
-        # 只插入输入缓冲内容（不插入提示符，由单板返回）
+        # 插入输入缓冲内容（作为预览，不插入提示符，由单板返回）
         input_content = ''.join(self.input_buffer)
         if input_content:
             self.output_text.insert(start, input_content)
         
         # 更新 input_line_range（输入行的范围）
-        # 输入行结束位置 = start + len(input_content)
         if input_content:
             new_end = self.output_text.index(f"{start} + {len(input_content)} chars")
         else:
@@ -1855,27 +1847,27 @@ class TabPage:
         self.input_line_range = (start, new_end)
         
         # 更新 input_start_mark（保持 LEFT gravity）
-        # 注意：由于 LEFT gravity，mark 的位置不会因为插入而改变
         self.output_text.mark_set(self.input_start_mark, start)
         self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
         
-        # 设置光标位置（不包含提示符长度）
+        # 设置光标位置
         cursor_pos = self.output_text.index(f"{start} + {self.input_cursor} chars")
         self.output_text.mark_set(tk.INSERT, cursor_pos)
         self.output_text.see(cursor_pos)
 
     def reset_input_buffer(self):
-        start = self.input_line_range[0]
-        end = self.output_text.index(tk.END)
-        if self.output_text.compare(end, ">=", start):
-            self.output_text.delete(start, end)
+        """重置输入缓冲（根据新的简化逻辑，不删除输出内容）"""
+        # 根据新的简化逻辑，输入应该由单板返回显示，不在本地显示
+        # 所以这里只清空输入缓冲，不删除任何输出内容
         self.input_buffer = []
         self.input_cursor = 0
-        # 不插入提示符，等待单板返回
+        # 更新标记位置到末尾（用于其他功能，但不影响显示）
         new_pos = self.output_text.index(tk.END)
-        self.input_line_range = (new_pos, new_pos)
-        self.output_text.mark_set(self.input_start_mark, new_pos)
-        self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
+        if hasattr(self, 'input_line_range'):
+            self.input_line_range = (new_pos, new_pos)
+        if hasattr(self, 'input_start_mark'):
+            self.output_text.mark_set(self.input_start_mark, new_pos)
+            self.output_text.mark_gravity(self.input_start_mark, tk.LEFT)
         self.output_text.mark_set(tk.INSERT, new_pos)
 
     def format_raw_text(self, raw_text):
