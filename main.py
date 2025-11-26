@@ -314,6 +314,49 @@ def disconnect():
     return _run_on_ui_thread(tab, action)
 
 
+def pop(message):
+    """在pop文本框中显示消息，每次显示会替换原来的内容"""
+    tab = _require_active_tab()
+    
+    def action():
+        tab.pop(str(message))
+        return None
+    
+    return _run_on_ui_thread(tab, action)
+
+
+def wait_for_confirmation(message):
+    """显示消息并等待用户点击"已确认，继续操作"按钮后继续执行
+    
+    支持多次调用，每次调用都会暂停执行，等待用户点击按钮后继续。
+    可以用于分段执行脚本，让用户在每个关键步骤确认后再继续。
+    """
+    tab = _require_active_tab()
+    # 确保事件对象存在
+    if not hasattr(tab, 'pop_confirmation_event'):
+        raise RuntimeError("pop_confirmation_event 未初始化")
+    
+    # 先清除事件（确保从清除状态开始等待）
+    tab.pop_confirmation_event.clear()
+    
+    # 显示消息（在UI线程中执行）
+    def show_message():
+        tab.pop(str(message))
+    
+    if threading.current_thread() == threading.main_thread():
+        # 如果在主线程，直接显示（虽然不应该在主线程调用，但为了安全）
+        show_message()
+    else:
+        # 在后台线程中，通过 after 在UI线程中显示消息
+        tab.root.after(0, show_message)
+        # 给UI线程一点时间显示消息
+        time.sleep(0.1)
+    
+    # 等待用户确认（在后台线程中等待，不会阻塞UI）
+    # 每次调用都会等待，直到用户点击按钮
+    tab.pop_confirmation_event.wait(timeout=300)  # 最多等待300秒
+
+
 def get_ip_address():
     """获取本机所有IPv4地址，返回列表"""
     try:
@@ -811,6 +854,8 @@ class TabPage:
         self.root = root_window
         self.connector = None
         self.output_queue = queue.Queue()
+        # 用于等待用户确认的事件对象
+        self.pop_confirmation_event = threading.Event()
         
         # 创建可滚动的容器
         # 创建Canvas和滚动条
@@ -1204,6 +1249,14 @@ class TabPage:
         self.smart_template_combo.bind("<<ComboboxSelected>>", self.apply_smart_template)
         ttk.Button(combo_inner, text="保存为模板", command=self.save_smart_template).pack(side=tk.LEFT, padx=5)
         title_frame.columnconfigure(1, weight=1)
+        
+        # Pop消息显示区域
+        pop_frame = ttk.Frame(title_frame)
+        pop_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(2, 0))
+        pop_frame.columnconfigure(0, weight=1)
+        self.pop_entry = ttk.Entry(pop_frame, state="readonly")
+        self.pop_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+        ttk.Button(pop_frame, text="已确认，继续操作", command=self.clear_pop).grid(row=0, column=1)
 
         self.smart_text = scrolledtext.ScrolledText(
             smart_frame,
@@ -1222,7 +1275,8 @@ class TabPage:
         
         # 定义可用的函数名列表（用于代码补全）
         self.smart_functions = [
-            "send", "tcp", "telnet", "com", "disconnect", "get_ip_address",
+            "send", "tcp", "telnet", "com", "disconnect", "get_ip_address", "pop",
+            "wait_for_confirmation",
             "start_receive", "get_receive", "end_receive",
             "send_file", "sftp_connect", "sftp_disconnect",
             "print", "wait"
@@ -1741,7 +1795,7 @@ class TabPage:
 
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
-
+        
         if self.input_cursor < len(self.input_buffer):
             self.input_buffer.pop(self.input_cursor)
             self.redraw_input_line()
@@ -1750,7 +1804,7 @@ class TabPage:
                 self.connector.send_command('\x04')  # Ctrl-D
             except Exception:
                 pass
-        return "break"
+                return "break"
     
     def append_output(self, text):
         """添加输出文本（线程安全）"""
@@ -2381,7 +2435,45 @@ class TabPage:
         self.current_template_name = title
         self.refresh_smart_templates(select_title=title)
         self.save_smart_templates()
-        messagebox.showinfo("提示", f"模板“{title}”已保存")
+        messagebox.showinfo("提示", f"模板「{title}」已保存")
+    
+    def pop(self, message):
+        """在pop文本框中显示消息，每次显示会替换原来的内容"""
+        if hasattr(self, 'pop_entry'):
+            self.pop_entry.config(state=tk.NORMAL)
+            self.pop_entry.delete(0, tk.END)
+            self.pop_entry.insert(0, str(message))
+            self.pop_entry.config(state="readonly")
+    
+    def wait_for_confirmation(self, message):
+        """显示消息并等待用户点击"已确认，继续操作"按钮"""
+        # 重置事件（清除之前的状态）
+        if hasattr(self, 'pop_confirmation_event'):
+            self.pop_confirmation_event.clear()
+        # 显示消息
+        self.pop(message)
+        # 等待用户确认（在UI线程中执行）
+        if threading.current_thread() == threading.main_thread():
+            # 如果在主线程，需要特殊处理，避免阻塞UI
+            # 这种情况下应该抛出异常，因为不应该在主线程中等待
+            raise RuntimeError("wait_for_confirmation 不能在UI主线程中调用")
+        # 等待事件被设置（最多等待300秒，避免永久阻塞）
+        self.pop_confirmation_event.wait(timeout=300)
+    
+    def clear_pop(self):
+        """清空pop文本框，并通知等待确认的线程继续执行
+        
+        每次点击"已确认，继续操作"按钮时，会设置事件以唤醒正在等待的线程。
+        支持多次调用 wait_for_confirmation，每次点击按钮都会让下一个等待继续执行。
+        """
+        if hasattr(self, 'pop_entry'):
+            self.pop_entry.config(state=tk.NORMAL)
+            self.pop_entry.delete(0, tk.END)
+            self.pop_entry.config(state="readonly")
+        # 通知等待确认的线程继续执行
+        # 每次点击按钮都会设置事件，让当前正在等待的 wait_for_confirmation 继续
+        if hasattr(self, 'pop_confirmation_event'):
+            self.pop_confirmation_event.set()
     
     def send_smart_command(self):
         """发送智能命令编辑区的命令"""
@@ -2532,6 +2624,8 @@ class TabPage:
             "• com(port, baudrate=115200): 使用串口连接单板\n"
             "• disconnect(): 断开当前连接\n"
             "• get_ip_address(): 获取当前电脑的IPv4地址列表\n"
+            "• pop(message): 在pop文本框中显示消息，每次显示会替换原来的内容\n"
+            "• wait_for_confirmation(message): 显示消息并暂停执行，等待用户点击「已确认，继续操作」按钮后继续\n"
             "• start_receive(): 开始捕获单板回显\n"
             "• get_receive(): 获取捕获内容但不结束\n"
             "• end_receive(): 结束捕获并返回文本\n"
@@ -2559,7 +2653,9 @@ class TabPage:
                 "telnet": telnet,
                 "com": com,
                 "disconnect": disconnect,
-                    "get_ip_address": get_ip_address,
+                "get_ip_address": get_ip_address,
+                "pop": pop,
+                "wait_for_confirmation": wait_for_confirmation,
                 "start_receive": start_receive,
                 "end_receive": end_receive,
                 "get_receive": get_receive,
@@ -3670,7 +3766,7 @@ class DeviceConnectionApp:
                 first_tab_config = self.config[tab_name]
                 break
         
-        # 始终使用“单板 1”作为第一个标签页的名称
+        # 始终使用"单板 1"作为第一个标签页的名称
         first_tab_name = "单板 1"
         if first_tab_config:
             self.add_tab(first_tab_name, first_tab_config)
