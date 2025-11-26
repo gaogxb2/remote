@@ -4012,18 +4012,12 @@ class DeviceConnectionApp:
             else:
                 updated_tabs[name] = page
         self.tabs = updated_tabs
-        # 更新配置字典
-        updated_config = {}
-        renamed = False
-        for name, cfg in self.config.items():
-            if name == tab_text:
-                updated_config[new_name] = cfg
-                renamed = True
-            else:
-                updated_config[name] = cfg
-        if not renamed and hasattr(tab_page, 'config'):
-            updated_config[new_name] = tab_page.config
-        self.config = updated_config
+        # 更新配置字典，使其引用最新的 TabPage 配置对象
+        new_config = {}
+        for name, page in self.tabs.items():
+            if hasattr(page, 'config'):
+                new_config[name] = page.config
+        self.config = new_config
         # 更新Notebook显示
         try:
             self.notebook.tab(tab_id, text=new_name)
