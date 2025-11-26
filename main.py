@@ -5,7 +5,7 @@
 """
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 import threading
 import queue
 import socket
@@ -3694,6 +3694,7 @@ class DeviceConnectionApp:
         self.tab_counter = 1  # 标签页计数器
         self.plus_tab_frame = None  # "+"标签页框架
         self.ignore_tab_change = False  # 是否忽略标签页切换事件
+        self.loading_tabs = False  # 是否处于加载配置阶段
         
         # 配置文件路径
         self.config_file = os.path.join(os.path.expanduser("~"), ".单板连接工具_config.json")
@@ -3729,6 +3730,8 @@ class DeviceConnectionApp:
             
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
+            # 同步内存中的配置
+            self.config = config
         except Exception as e:
             print(f"保存配置失败: {e}")
     
@@ -3747,6 +3750,11 @@ class DeviceConnectionApp:
         self.notebook = ttk.Notebook(main_frame)
         self.notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+        self.notebook.bind("<Button-3>", self.on_tab_right_click)
+        self.notebook.bind("<Double-Button-1>", self.on_tab_double_click)
+        self.tab_menu = tk.Menu(self.root, tearoff=0)
+        self.tab_menu.add_command(label="重命名标签页", command=self.rename_selected_tab)
+        self.context_menu_tab_id = None
         
         # 工具栏（只保留关闭按钮）
         toolbar = ttk.Frame(main_frame)
@@ -3755,26 +3763,25 @@ class DeviceConnectionApp:
         ttk.Button(toolbar, text="关闭当前标签页", command=self.close_current_tab).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="调试模式", command=self.open_debug_window).pack(side=tk.LEFT, padx=5)
         
-        # 每次启动时都从“单板 1”开始计数
+        # 每次启动时记录已有标签计数
         self.tab_counter = 1
         
-        # 创建第一个标签页（如果有保存的配置，恢复配置）
-        # 尝试加载第一个标签页的配置
-        first_tab_config = None
-        for tab_name in self.config.keys():
-            if tab_name != "+":
-                first_tab_config = self.config[tab_name]
-                break
-        
-        # 始终使用"单板 1"作为第一个标签页的名称
-        first_tab_name = "单板 1"
-        if first_tab_config:
-            self.add_tab(first_tab_name, first_tab_config)
+        # 根据配置恢复标签页，如果没有配置则创建默认标签页
+        saved_tab_names = [name for name in self.config.keys() if name != "+"]
+        self.loading_tabs = True
+        if saved_tab_names:
+            for name in saved_tab_names:
+                self.add_tab(name, self.config.get(name))
+            # 默认选中第一个已保存的标签页
+            self.select_tab_by_name(saved_tab_names[0])
         else:
-            self.add_tab(first_tab_name)
+            self.add_tab("单板 1")
+        self.loading_tabs = False
         
         # 添加"+"标签页
         self.add_plus_tab()
+        # 保存一次配置，确保标签集合记录最新状态
+        self.save_config()
     
     def add_tab(self, tab_name=None, config=None):
         """添加新标签页"""
@@ -3823,6 +3830,9 @@ class DeviceConnectionApp:
         
         # 恢复标志
         self.ignore_tab_change = False
+        # 保存当前配置（确保新标签页被记录）
+        if not self.loading_tabs:
+            self.save_config()
     
     def add_plus_tab(self):
         """添加"+"标签页"""
@@ -3895,6 +3905,7 @@ class DeviceConnectionApp:
             
             # 恢复标志
             self.ignore_tab_change = False
+            self.save_config()
     
     def on_tab_changed(self, event=None):
         """标签页切换时的处理"""
@@ -3915,6 +3926,111 @@ class DeviceConnectionApp:
             self.root.after(10, self.add_tab)
         else:
             self.set_active_tab(tab_name)
+    
+    def select_tab_by_name(self, tab_name):
+        """根据名称选中标签页"""
+        for tab_id in self.notebook.tabs():
+            if self.notebook.tab(tab_id, "text") == tab_name:
+                self.notebook.select(tab_id)
+                self.set_active_tab(tab_name)
+                break
+
+    def get_tab_id_at(self, x, y):
+        """根据坐标获取标签ID"""
+        try:
+            return self.notebook.index(f"@{x},{y}")
+        except tk.TclError:
+            return None
+
+    def on_tab_right_click(self, event):
+        """右键点击标签页，弹出菜单"""
+        tab_id = self.get_tab_id_at(event.x, event.y)
+        if tab_id is None:
+            return
+        tab_text = self.notebook.tab(tab_id, "text")
+        if tab_text == "+":
+            return
+        self.context_menu_tab_id = tab_id
+        try:
+            self.tab_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.tab_menu.grab_release()
+
+    def on_tab_double_click(self, event):
+        """双击标签页触发重命名"""
+        tab_id = self.get_tab_id_at(event.x, event.y)
+        if tab_id is None:
+            return
+        self.rename_tab_by_id(tab_id)
+
+    def rename_selected_tab(self):
+        """重命名当前选中的标签页"""
+        if self.context_menu_tab_id is not None:
+            tab_id = self.context_menu_tab_id
+            self.context_menu_tab_id = None
+        else:
+            current = self.notebook.select()
+            if not current:
+                return
+            tab_id = self.notebook.index(current)
+        self.rename_tab_by_id(tab_id)
+
+    def rename_tab_by_id(self, tab_id):
+        """执行标签页重命名"""
+        try:
+            tab_text = self.notebook.tab(tab_id, "text")
+        except tk.TclError:
+            return
+        if tab_text == "+":
+            return
+        new_name = simpledialog.askstring(
+            "重命名标签页",
+            "请输入新的标签页名称：",
+            initialvalue=tab_text,
+            parent=self.root
+        )
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not new_name:
+            messagebox.showwarning("警告", "标签页名称不能为空")
+            return
+        if new_name == tab_text:
+            return
+        if new_name in self.tabs:
+            messagebox.showwarning("警告", f"已存在名称为“{new_name}”的标签页，请换一个名称。")
+            return
+        tab_page = self.tabs.get(tab_text)
+        if not tab_page:
+            return
+        tab_page.tab_name = new_name
+        # 重建 tabs 字典保持原有顺序
+        updated_tabs = {}
+        for name, page in self.tabs.items():
+            if name == tab_text:
+                updated_tabs[new_name] = page
+            else:
+                updated_tabs[name] = page
+        self.tabs = updated_tabs
+        # 更新配置字典
+        updated_config = {}
+        renamed = False
+        for name, cfg in self.config.items():
+            if name == tab_text:
+                updated_config[new_name] = cfg
+                renamed = True
+            else:
+                updated_config[name] = cfg
+        if not renamed and hasattr(tab_page, 'config'):
+            updated_config[new_name] = tab_page.config
+        self.config = updated_config
+        # 更新Notebook显示
+        try:
+            self.notebook.tab(tab_id, text=new_name)
+        except tk.TclError:
+            pass
+        self.set_active_tab(new_name)
+        self.save_config()
     
     def set_active_tab(self, tab_name):
         """设置当前活动标签页供 send() 使用"""
