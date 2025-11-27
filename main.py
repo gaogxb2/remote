@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import time
 import subprocess
+import ftplib
 
 # 条件导入 serial 和 paramiko（在测试模式下使用模拟模块）
 if '--test' in sys.argv:
@@ -141,7 +142,7 @@ def send_file(source_path, dest_path):
     """
     tab = _require_active_tab()
     
-    if not tab.sftp_connector or not tab.sftp_connector.connected:
+    if not tab.file_connector or not tab.file_connector.connected:
         return False
     
     # 判断路径类型：如果源路径存在且是本地文件，则为本地->远程
@@ -151,11 +152,11 @@ def send_file(source_path, dest_path):
     
     if source_is_local and not dest_is_local:
         # 本地 -> 远程
-        success, msg = tab.sftp_connector.upload_file(source_path, dest_path)
+        success, msg = tab.file_connector.upload_file(source_path, dest_path)
         return success
     elif not source_is_local and dest_is_local:
         # 远程 -> 本地
-        success, msg = tab.sftp_connector.download_file(source_path, dest_path)
+        success, msg = tab.file_connector.download_file(source_path, dest_path)
         return success
     elif source_is_local and dest_is_local:
         # 两个都是本地路径，使用本地文件复制
@@ -171,80 +172,71 @@ def send_file(source_path, dest_path):
 
 
 def sftp_connect(host, port, username, password):
-    """
-    建立SFTP连接
-    参数:
-        host: 主机IP地址
-        port: 端口号（字符串或整数）
-        username: 用户名
-        password: 密码
-    返回:
-        bool: 成功返回True，失败返回False
-    """
+    """在智能脚本中建立SFTP连接"""
     tab = _require_active_tab()
+    host = str(host).strip()
+    port = str(port).strip()
+    username = str(username).strip()
+    password = str(password)
     
-    try:
-        # 如果已经连接，先断开
-        if tab.sftp_connector and tab.sftp_connector.connected:
-            tab.sftp_connector.disconnect()
-        
-        # 创建新的连接器（SFTPConnector在同一个文件中定义）
-        # 使用globals()获取当前模块中定义的类
-        SFTPConnector = globals().get('SFTPConnector')
-        if SFTPConnector is None:
-            return False
-        
-        tab.sftp_connector = SFTPConnector()
-        
-        # 连接
-        result = tab.sftp_connector.connect(str(host), str(port), str(username), str(password))
-        
-        # 处理返回值
-        if isinstance(result, tuple):
-            success, error_msg = result
-        else:
-            success = result
-            error_msg = ""
-        
-        if success:
-            # 更新UI状态
-            tab.sftp_connect_btn.config(text="断开SFTP")
-            tab.sftp_status_label.config(text="SFTP: 已连接", foreground="green")
-            tab.remote_path = tab.sftp_connector.get_current_directory()
-            tab.remote_path_entry.delete(0, tk.END)
-            tab.remote_path_entry.insert(0, tab.remote_path)
-            tab.refresh_remote_files()
-            # 保存SFTP配置
-            tab.save_sftp_config(str(host), str(port), str(username), str(password))
-        
-        return success
-    except Exception as e:
-        return False
+    def action():
+        tab.file_protocol.set("SFTP")
+        tab.file_protocol_combo.set("SFTP")
+        tab.on_file_protocol_change()
+        tab.sftp_host_entry.delete(0, tk.END)
+        tab.sftp_host_entry.insert(0, host)
+        tab.sftp_port_entry.delete(0, tk.END)
+        tab.sftp_port_entry.insert(0, port or "22")
+        tab.sftp_user_entry.delete(0, tk.END)
+        tab.sftp_user_entry.insert(0, username)
+        tab.sftp_pass_entry.delete(0, tk.END)
+        tab.sftp_pass_entry.insert(0, password)
+        tab.connect_file_transfer()
+        return bool(tab.file_connector and tab.file_connector.connected)
+    
+    return _run_on_ui_thread(tab, action)
+
+
+def ftp_connect(host, port, username, password):
+    """在智能脚本中建立FTP连接"""
+    tab = _require_active_tab()
+    host = str(host).strip()
+    port = str(port).strip()
+    username = str(username).strip()
+    password = str(password)
+    
+    def action():
+        tab.file_protocol.set("FTP")
+        tab.file_protocol_combo.set("FTP")
+        tab.on_file_protocol_change()
+        tab.sftp_host_entry.delete(0, tk.END)
+        tab.sftp_host_entry.insert(0, host)
+        tab.sftp_port_entry.delete(0, tk.END)
+        tab.sftp_port_entry.insert(0, port or "21")
+        tab.sftp_user_entry.delete(0, tk.END)
+        tab.sftp_user_entry.insert(0, username)
+        tab.sftp_pass_entry.delete(0, tk.END)
+        tab.sftp_pass_entry.insert(0, password)
+        tab.connect_file_transfer()
+        return bool(tab.file_connector and tab.file_connector.connected)
+    
+    return _run_on_ui_thread(tab, action)
 
 
 def sftp_disconnect():
-    """
-    关闭当前的SFTP连接
-    返回:
-        bool: 成功返回True，失败返回False
-    """
+    """断开当前文件传输连接"""
     tab = _require_active_tab()
     
-    try:
-        if tab.sftp_connector:
-            tab.sftp_connector.disconnect()
-            tab.sftp_connector = None
-        
-        # 更新UI状态
-        tab.sftp_connect_btn.config(text="连接SFTP")
-        tab.sftp_status_label.config(text="SFTP: 未连接", foreground="red")
-        # 清空Treeview
-        for item in tab.remote_files_tree.get_children():
-            tab.remote_files_tree.delete(item)
-        
+    def action():
+        tab.disconnect_file_transfer()
         return True
-    except Exception as e:
-        return False
+    
+    return _run_on_ui_thread(tab, action)
+
+
+def ftp_disconnect():
+    """断开当前文件传输连接（FTP）"""
+    return sftp_disconnect()
 
 
 def tcp(host, port):
@@ -845,6 +837,121 @@ class SFTPConnector:
             return "."
 
 
+class FTPConnector:
+    """FTP连接器"""
+    
+    def __init__(self):
+        self.ftp = None
+        self.connected = False
+    
+    def connect(self, host, port, username, password, timeout=10):
+        """连接FTP服务器"""
+        try:
+            self.ftp = ftplib.FTP()
+            self.ftp.connect(host, int(port), timeout=timeout)
+            self.ftp.login(user=username, passwd=password)
+            self.connected = True
+            return True, "连接成功"
+        except Exception as e:
+            self.disconnect()
+            return False, str(e)
+    
+    def disconnect(self):
+        """断开连接"""
+        try:
+            if self.ftp:
+                try:
+                    self.ftp.quit()
+                except Exception:
+                    self.ftp.close()
+        except:
+            pass
+        self.connected = False
+        self.ftp = None
+    
+    def list_files(self, remote_path="."):
+        """列出远程目录"""
+        if not self.connected or not self.ftp:
+            return []
+        files = []
+        try:
+            current = self.ftp.pwd()
+            self.ftp.cwd(remote_path)
+            try:
+                entries = list(self.ftp.mlsd())
+                for name, facts in entries:
+                    is_dir = facts.get('type') == 'dir'
+                    size = int(facts.get('size', 0)) if facts.get('size') else 0
+                    files.append({
+                        'name': name,
+                        'size': size,
+                        'is_dir': is_dir,
+                        'mode': facts.get('perm', '')
+                    })
+            except Exception:
+                names = self.ftp.nlst()
+                for name in names:
+                    is_dir = False
+                    size = 0
+                    try:
+                        current_pos = self.ftp.pwd()
+                        self.ftp.cwd(name)
+                        is_dir = True
+                        self.ftp.cwd(current_pos)
+                    except Exception:
+                        try:
+                            size = self.ftp.size(name) or 0
+                        except Exception:
+                            size = 0
+                    files.append({
+                        'name': name,
+                        'size': size,
+                        'is_dir': is_dir,
+                        'mode': ''
+                    })
+            self.ftp.cwd(current)
+            return files
+        except Exception:
+            return []
+    
+    def upload_file(self, local_path, remote_path):
+        if not self.connected or not self.ftp:
+            return False, "未连接"
+        try:
+            with open(local_path, 'rb') as f:
+                self.ftp.storbinary(f"STOR {remote_path}", f)
+            return True, "上传成功"
+        except Exception as e:
+            return False, str(e)
+    
+    def download_file(self, remote_path, local_path):
+        if not self.connected or not self.ftp:
+            return False, "未连接"
+        try:
+            with open(local_path, 'wb') as f:
+                self.ftp.retrbinary(f"RETR {remote_path}", f.write)
+            return True, "下载成功"
+        except Exception as e:
+            return False, str(e)
+    
+    def change_directory(self, remote_path):
+        if not self.connected or not self.ftp:
+            return False, "未连接"
+        try:
+            self.ftp.cwd(remote_path)
+            return True, "切换成功"
+        except Exception as e:
+            return False, str(e)
+    
+    def get_current_directory(self):
+        if not self.connected or not self.ftp:
+            return "."
+        try:
+            return self.ftp.pwd()
+        except Exception:
+            return "."
+
+
 class TabPage:
     """单个标签页，包含完整的连接功能"""
     
@@ -904,8 +1011,9 @@ class TabPage:
         # 保存canvas引用以便后续使用
         self.canvas = canvas
         
-        # SFTP相关变量
-        self.sftp_connector = None
+        # 文件传输（SFTP/FTP）相关
+        self.file_connector = None
+        self.active_file_protocol = None
         self.local_path = os.path.expanduser("~")
         self.remote_path = "/"
         
@@ -940,7 +1048,7 @@ class TabPage:
         self.config = {
             "connection": {},
             "commands": [],
-            "sftp": {},
+            "file_transfer": {},
             "smart_templates": self.smart_templates.copy(),
             "smart_code": "",
             "line_ending_crlf": False
@@ -1216,12 +1324,12 @@ class TabPage:
                            command=lambda c=cmd: self.send_quick_command_text(c))
             btn.grid(row=0, column=i, padx=2)
         
-        # SFTP文件传输区域
-        sftp_frame = ttk.LabelFrame(self.frame, text="SFTP文件传输", padding="10")
-        sftp_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
-        sftp_frame.columnconfigure(0, weight=1)
-        sftp_frame.columnconfigure(1, weight=1)
-        sftp_frame.rowconfigure(1, weight=1)
+        # 文件传输区域（支持SFTP/FTP）
+        file_frame = ttk.LabelFrame(self.frame, text="文件传输 (SFTP/FTP)", padding="10")
+        file_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        file_frame.columnconfigure(0, weight=1)
+        file_frame.columnconfigure(1, weight=1)
+        file_frame.rowconfigure(1, weight=1)
         
         # 智能命令编辑区域（右侧列）
         smart_frame = ttk.LabelFrame(self.frame, text="智能命令编辑", padding="10")
@@ -1279,6 +1387,7 @@ class TabPage:
             "wait_for_confirmation",
             "start_receive", "get_receive", "end_receive",
             "send_file", "sftp_connect", "sftp_disconnect",
+            "ftp_connect", "ftp_disconnect",
             "print", "wait"
         ]
         
@@ -1327,37 +1436,49 @@ class TabPage:
         )
         self.std_output.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
         
-        # SFTP连接设置
-        sftp_conn_frame = ttk.Frame(sftp_frame)
-        sftp_conn_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        # 文件连接设置
+        file_conn_frame = ttk.Frame(file_frame)
+        file_conn_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
         
-        ttk.Label(sftp_conn_frame, text="SFTP主机:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
-        self.sftp_host_entry = ttk.Entry(sftp_conn_frame, width=15)
-        self.sftp_host_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(file_conn_frame, text="协议:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.file_protocol = tk.StringVar(value="SFTP")
+        self.file_protocol_combo = ttk.Combobox(
+            file_conn_frame,
+            width=6,
+            state="readonly",
+            values=("SFTP", "FTP"),
+            textvariable=self.file_protocol
+        )
+        self.file_protocol_combo.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        self.file_protocol_combo.bind("<<ComboboxSelected>>", self.on_file_protocol_change)
+        
+        ttk.Label(file_conn_frame, text="主机:").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+        self.sftp_host_entry = ttk.Entry(file_conn_frame, width=15)
+        self.sftp_host_entry.grid(row=0, column=3, padx=5, pady=5, sticky=tk.W)
         self.sftp_host_entry.insert(0, "192.168.1.100")
         
-        ttk.Label(sftp_conn_frame, text="端口:").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
-        self.sftp_port_entry = ttk.Entry(sftp_conn_frame, width=8)
-        self.sftp_port_entry.grid(row=0, column=3, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(file_conn_frame, text="端口:").grid(row=0, column=4, padx=5, pady=5, sticky=tk.W)
+        self.sftp_port_entry = ttk.Entry(file_conn_frame, width=8)
+        self.sftp_port_entry.grid(row=0, column=5, padx=5, pady=5, sticky=tk.W)
         self.sftp_port_entry.insert(0, "22")
         
-        ttk.Label(sftp_conn_frame, text="用户名:").grid(row=0, column=4, padx=5, pady=5, sticky=tk.W)
-        self.sftp_user_entry = ttk.Entry(sftp_conn_frame, width=12)
-        self.sftp_user_entry.grid(row=0, column=5, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(file_conn_frame, text="用户名:").grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
+        self.sftp_user_entry = ttk.Entry(file_conn_frame, width=12)
+        self.sftp_user_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
         self.sftp_user_entry.insert(0, "root")
         
-        ttk.Label(sftp_conn_frame, text="密码:").grid(row=0, column=6, padx=5, pady=5, sticky=tk.W)
-        self.sftp_pass_entry = ttk.Entry(sftp_conn_frame, width=12, show="*")
-        self.sftp_pass_entry.grid(row=0, column=7, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(file_conn_frame, text="密码:").grid(row=1, column=2, padx=5, pady=5, sticky=tk.W)
+        self.sftp_pass_entry = ttk.Entry(file_conn_frame, width=12, show="*")
+        self.sftp_pass_entry.grid(row=1, column=3, padx=5, pady=5, sticky=tk.W)
         
-        self.sftp_connect_btn = ttk.Button(sftp_conn_frame, text="连接SFTP", command=self.toggle_sftp_connection)
-        self.sftp_connect_btn.grid(row=0, column=8, padx=5, pady=5)
+        self.file_connect_btn = ttk.Button(file_conn_frame, text="连接", command=self.toggle_file_connection)
+        self.file_connect_btn.grid(row=1, column=4, padx=5, pady=5)
         
-        self.sftp_status_label = ttk.Label(sftp_conn_frame, text="SFTP: 未连接", foreground="red")
-        self.sftp_status_label.grid(row=0, column=9, padx=5, pady=5)
+        self.file_status_label = ttk.Label(file_conn_frame, text="SFTP: 未连接", foreground="red")
+        self.file_status_label.grid(row=1, column=5, padx=5, pady=5, sticky=tk.W)
         
         # 文件列表区域（左右分栏）
-        files_container = ttk.Frame(sftp_frame)
+        files_container = ttk.Frame(file_frame)
         files_container.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S))
         files_container.columnconfigure(0, weight=1)
         files_container.columnconfigure(1, weight=1)
@@ -1419,7 +1540,7 @@ class TabPage:
         self.remote_files_tree.config(yscrollcommand=remote_scrollbar.set)
         
         # 操作按钮
-        buttons_frame = ttk.Frame(sftp_frame)
+        buttons_frame = ttk.Frame(file_frame)
         buttons_frame.grid(row=2, column=0, columnspan=2, pady=10)
         
         ttk.Button(buttons_frame, text="上传 →", command=self.upload_file).pack(side=tk.LEFT, padx=5)
@@ -2632,6 +2753,8 @@ class TabPage:
             "• send_file(src, dst): 传输文件（本地<->远程），返回True/False\n"
             "• sftp_connect(host, port, user, pwd): 建立SFTP连接，返回True/False\n"
             "• sftp_disconnect(): 关闭SFTP连接，返回True/False\n"
+            "• ftp_connect(host, port, user, pwd): 建立FTP连接，返回True/False\n"
+            "• ftp_disconnect(): 关闭FTP连接，返回True/False\n"
             "• print(...): 将信息输出到脚本输出窗口\n"
             "• wait(seconds): 等同于 time.sleep，用于延时\n\n"
             "可以编写多行 Python 代码，例如循环发送命令、等待回显等。"
@@ -2662,6 +2785,8 @@ class TabPage:
                 "send_file": send_file,
                 "sftp_connect": sftp_connect,
                 "sftp_disconnect": sftp_disconnect,
+                "ftp_connect": ftp_connect,
+                "ftp_disconnect": ftp_disconnect,
                 "wait": time.sleep,
                 "sleep": time.sleep
             }
@@ -2755,26 +2880,46 @@ class TabPage:
         except Exception as e:
             messagebox.showerror("错误", f"读取文件失败: {str(e)}")
     
-    def toggle_sftp_connection(self):
-        """切换SFTP连接状态"""
-        if self.sftp_connector and self.sftp_connector.connected:
-            self.disconnect_sftp()
-        else:
-            self.connect_sftp()
+    def on_file_protocol_change(self, event=None):
+        """协议切换时更新端口默认值和状态显示"""
+        protocol = self.file_protocol.get()
+        default_port = "22" if protocol == "SFTP" else "21"
+        current_port = self.sftp_port_entry.get().strip()
+        if not current_port or current_port in ("22", "21"):
+            self.sftp_port_entry.delete(0, tk.END)
+            self.sftp_port_entry.insert(0, default_port)
+        if not (self.file_connector and self.file_connector.connected):
+            self.file_status_label.config(text=f"{protocol}: 未连接", foreground="red")
+        self.save_file_transfer_config(protocol, self.sftp_host_entry.get().strip(),
+                                       self.sftp_port_entry.get().strip(),
+                                       self.sftp_user_entry.get().strip(),
+                                       self.sftp_pass_entry.get().strip())
     
-    def connect_sftp(self):
-        """连接SFTP"""
+    def toggle_file_connection(self):
+        """切换文件传输连接状态"""
+        if self.file_connector and self.file_connector.connected:
+            self.disconnect_file_transfer()
+        else:
+            self.connect_file_transfer()
+    
+    def connect_file_transfer(self):
+        """连接SFTP或FTP"""
         host = self.sftp_host_entry.get().strip()
         port = self.sftp_port_entry.get().strip()
         username = self.sftp_user_entry.get().strip()
         password = self.sftp_pass_entry.get().strip()
+        protocol = self.file_protocol.get()
         
         if not all([host, port, username]):
-            messagebox.showerror("错误", "请填写完整的SFTP连接信息")
+            messagebox.showerror("错误", f"请填写完整的{protocol}连接信息")
             return
         
-        self.sftp_connector = SFTPConnector()
-        result = self.sftp_connector.connect(host, port, username, password)
+        if self.file_connector and self.file_connector.connected:
+            self.file_connector.disconnect()
+            self.file_connector = None
+        
+        connector = SFTPConnector() if protocol == "SFTP" else FTPConnector()
+        result = connector.connect(host, port, username, password)
         
         if isinstance(result, tuple):
             success, error_msg = result
@@ -2783,31 +2928,32 @@ class TabPage:
             error_msg = ""
         
         if success:
-            self.sftp_connect_btn.config(text="断开SFTP")
-            self.sftp_status_label.config(text="SFTP: 已连接", foreground="green")
-            self.remote_path = self.sftp_connector.get_current_directory()
+            self.file_connector = connector
+            self.active_file_protocol = protocol
+            self.file_connect_btn.config(text="断开")
+            self.file_status_label.config(text=f"{protocol}: 已连接", foreground="green")
+            self.remote_path = self.file_connector.get_current_directory() or "/"
             self.remote_path_entry.delete(0, tk.END)
             self.remote_path_entry.insert(0, self.remote_path)
             self.refresh_remote_files()
-            self.append_output(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] SFTP连接成功\n")
-            
-            # 保存SFTP配置
-            self.save_sftp_config(host, port, username, password)
+            self.append_output(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {protocol}连接成功\n")
+            self.save_file_transfer_config(protocol, host, port, username, password)
         else:
-            self.sftp_status_label.config(text="SFTP: 连接失败", foreground="red")
-            messagebox.showerror("错误", f"SFTP连接失败: {error_msg}")
+            self.file_status_label.config(text=f"{protocol}: 连接失败", foreground="red")
+            messagebox.showerror("错误", f"{protocol}连接失败: {error_msg}")
     
-    def disconnect_sftp(self):
-        """断开SFTP连接"""
-        if self.sftp_connector:
-            self.sftp_connector.disconnect()
-            self.sftp_connector = None
-        self.sftp_connect_btn.config(text="连接SFTP")
-        self.sftp_status_label.config(text="SFTP: 未连接", foreground="red")
-        # 清空Treeview
+    def disconnect_file_transfer(self):
+        """断开文件传输连接"""
+        protocol = self.active_file_protocol or self.file_protocol.get()
+        if self.file_connector:
+            self.file_connector.disconnect()
+            self.file_connector = None
+        self.active_file_protocol = None
+        self.file_connect_btn.config(text="连接")
+        self.file_status_label.config(text=f"{protocol}: 未连接", foreground="red")
         for item in self.remote_files_tree.get_children():
             self.remote_files_tree.delete(item)
-        self.append_output(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] SFTP已断开连接\n")
+        self.append_output(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {protocol}已断开连接\n")
     
     def refresh_local_files(self):
         """刷新本地文件列表"""
@@ -2855,57 +3001,52 @@ class TabPage:
     
     def refresh_remote_files(self):
         """刷新远程文件列表"""
-        if not self.sftp_connector or not self.sftp_connector.connected:
-            # 清空Treeview
+        if not self.file_connector or not self.file_connector.connected:
             for item in self.remote_files_tree.get_children():
                 self.remote_files_tree.delete(item)
             return
         
-        path = self.remote_path_entry.get().strip()
-        if not path:
-            path = "/"
+        path = self.remote_path_entry.get().strip() or "/"
         
-        # 清空Treeview
         for item in self.remote_files_tree.get_children():
             self.remote_files_tree.delete(item)
         
         try:
-            # 尝试切换目录
             if path != self.remote_path:
-                result = self.sftp_connector.change_directory(path)
+                result = self.file_connector.change_directory(path)
                 if isinstance(result, tuple):
                     success, msg = result
-                    if not success:
-                        messagebox.showerror("错误", f"切换目录失败: {msg}")
-                        self.remote_path_entry.delete(0, tk.END)
-                        self.remote_path_entry.insert(0, self.remote_path)
-                        path = self.remote_path
-                    else:
-                        self.remote_path = self.sftp_connector.get_current_directory()
-                        self.remote_path_entry.delete(0, tk.END)
-                        self.remote_path_entry.insert(0, self.remote_path)
+                else:
+                    success = bool(result)
+                    msg = ""
+                if not success:
+                    messagebox.showerror("错误", f"切换目录失败: {msg}")
+                    self.remote_path_entry.delete(0, tk.END)
+                    self.remote_path_entry.insert(0, self.remote_path)
+                    path = self.remote_path
+                else:
+                    self.remote_path = self.file_connector.get_current_directory() or path
+                    self.remote_path_entry.delete(0, tk.END)
+                    self.remote_path_entry.insert(0, self.remote_path)
             
-            # 添加父目录
-            if self.remote_path != "/":
+            if self.remote_path not in ("", "/"):
                 icon = self.get_file_icon("..", is_dir=True)
                 self.remote_files_tree.insert("", tk.END, text=f"{icon} ..", values=("..", True))
             
-            # 列出文件
-            files = self.sftp_connector.list_files(self.remote_path)
-            files.sort(key=lambda x: (not x['is_dir'], x['name'].lower()))
+            files = self.file_connector.list_files(self.remote_path)
+            files.sort(key=lambda x: (not x.get('is_dir', False), x.get('name', '').lower()))
             
             for file_info in files:
-                name = file_info['name']
-                is_dir = file_info['is_dir']
+                name = file_info.get('name', '')
+                is_dir = file_info.get('is_dir', False)
                 icon = self.get_file_icon(name, is_dir=is_dir)
-                
                 if is_dir:
                     display_text = f"{icon} {name}"
                     self.remote_files_tree.insert("", tk.END, text=display_text, values=(name, True))
                 else:
-                    size_str = self.format_size(file_info['size'])
+                    size_str = self.format_size(file_info.get('size', 0))
                     display_text = f"{icon} {name} ({size_str})"
-                    self.remote_files_tree.insert("", tk.END, text=display_text, values=(name, False, file_info['size']))
+                    self.remote_files_tree.insert("", tk.END, text=display_text, values=(name, False, file_info.get('size', 0)))
         except Exception as e:
             messagebox.showerror("错误", f"读取远程目录失败: {str(e)}")
     
@@ -2959,7 +3100,7 @@ class TabPage:
     
     def on_remote_file_double_click(self):
         """远程文件双击事件"""
-        if not self.sftp_connector or not self.sftp_connector.connected:
+        if not self.file_connector or not self.file_connector.connected:
             return
         
         selection = self.remote_files_tree.selection()
@@ -2981,15 +3122,15 @@ class TabPage:
         else:
             return  # 文件双击不处理
         
-        # 检查是否是目录
         try:
-            files = self.sftp_connector.list_files(new_path)
-            self.remote_path = new_path
-            self.remote_path_entry.delete(0, tk.END)
-            self.remote_path_entry.insert(0, self.remote_path)
-            self.refresh_remote_files()
-        except:
-            pass  # 不是目录，忽略
+            files = self.file_connector.list_files(new_path)
+            if files is not None:
+                self.remote_path = new_path
+                self.remote_path_entry.delete(0, tk.END)
+                self.remote_path_entry.insert(0, self.remote_path)
+                self.refresh_remote_files()
+        except Exception:
+            pass
     
     def on_local_file_right_click(self, event):
         """本地文件右键事件"""
@@ -3001,8 +3142,8 @@ class TabPage:
     
     def upload_file(self):
         """上传文件"""
-        if not self.sftp_connector or not self.sftp_connector.connected:
-            messagebox.showwarning("警告", "请先连接SFTP")
+        if not self.file_connector or not self.file_connector.connected:
+            messagebox.showwarning("警告", "请先建立SFTP/FTP连接")
             return
         
         selection = self.local_files_tree.selection()
@@ -3035,7 +3176,7 @@ class TabPage:
         remote_file = os.path.join(self.remote_path, name).replace("\\", "/")
         
         try:
-            success, msg = self.sftp_connector.upload_file(local_path, remote_file)
+            success, msg = self.file_connector.upload_file(local_path, remote_file)
             if success:
                 messagebox.showinfo("成功", f"文件上传成功: {name}")
                 self.refresh_remote_files()
@@ -3047,8 +3188,8 @@ class TabPage:
     
     def download_file(self):
         """下载文件"""
-        if not self.sftp_connector or not self.sftp_connector.connected:
-            messagebox.showwarning("警告", "请先连接SFTP")
+        if not self.file_connector or not self.file_connector.connected:
+            messagebox.showwarning("警告", "请先建立SFTP/FTP连接")
             return
         
         selection = self.remote_files_tree.selection()
@@ -3085,7 +3226,7 @@ class TabPage:
             return
         
         try:
-            success, msg = self.sftp_connector.download_file(remote_path, local_file)
+            success, msg = self.file_connector.download_file(remote_path, local_file)
             if success:
                 messagebox.showinfo("成功", f"文件下载成功: {name}")
                 self.refresh_local_files()
@@ -3120,9 +3261,12 @@ class TabPage:
             if hasattr(top, 'save_config'):
                 top.save_config()
     
-    def save_sftp_config(self, host, port, username, password):
-        """保存SFTP配置"""
-        self.config["sftp"] = {
+    def save_file_transfer_config(self, protocol, host, port, username, password):
+        """保存文件传输配置"""
+        if not protocol:
+            protocol = "SFTP"
+        self.config["file_transfer"] = {
+            "type": protocol,
             "host": host,
             "port": port,
             "username": username,
@@ -3196,13 +3340,16 @@ class TabPage:
         self.config["line_ending_crlf"] = line_ending_crlf
         self.apply_line_ending_to_connector()
         
-        # 恢复SFTP配置
-        if "sftp" in config:
-            sftp_config = config["sftp"]
-            host = sftp_config.get("host", "")
-            port = sftp_config.get("port", "22")
-            username = sftp_config.get("username", "")
-            password = sftp_config.get("password", "")
+        # 恢复文件传输配置
+        file_config = config.get("file_transfer") or config.get("sftp")
+        if file_config:
+            protocol = file_config.get("type", "SFTP")
+            self.file_protocol.set(protocol)
+            self.file_protocol_combo.set(protocol)
+            host = file_config.get("host", "")
+            port = file_config.get("port", "22" if protocol == "SFTP" else "21")
+            username = file_config.get("username", "")
+            password = file_config.get("password", "")
             
             if host:
                 self.sftp_host_entry.delete(0, tk.END)
@@ -3216,6 +3363,7 @@ class TabPage:
             if password:
                 self.sftp_pass_entry.delete(0, tk.END)
                 self.sftp_pass_entry.insert(0, password)
+            self.on_file_protocol_change()
     
     def cleanup(self):
         """清理资源"""
@@ -3225,8 +3373,8 @@ class TabPage:
         
         if self.connector and self.connector.connected:
             self.disconnect()
-        if self.sftp_connector and self.sftp_connector.connected:
-            self.disconnect_sftp()
+        if self.file_connector and self.file_connector.connected:
+            self.disconnect_file_transfer()
 
 
 class DebugWindow:
