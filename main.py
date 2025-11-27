@@ -1199,15 +1199,42 @@ class TabPage:
     
     def setup_ui(self):
         """设置用户界面"""
-        # 连接方式选择
-        self.frame.columnconfigure(0, weight=3)
-        self.frame.columnconfigure(1, weight=2)
-        self.frame.columnconfigure(2, weight=1)
-        for i in range(4):
-            self.frame.rowconfigure(i, weight=0)
-        self.frame.rowconfigure(3, weight=1)
+        # 使用PanedWindow实现可调整大小的布局
+        # 从配置加载布局比例，如果没有则使用默认值
+        layout_config = self.config.get("ui_layout", {})
+        h_pane1_size = layout_config.get("horizontal_pane1", 600)  # 左侧列宽度
+        h_pane2_size = layout_config.get("horizontal_pane2", 400)  # 中间列宽度
+        h_pane3_size = layout_config.get("horizontal_pane3", 200)   # 右侧列宽度
         
-        conn_frame = ttk.LabelFrame(self.frame, text="连接设置", padding="10")
+        # 水平PanedWindow：分割左侧、中间、右侧三列
+        self.h_paned = ttk.PanedWindow(self.frame, orient=tk.HORIZONTAL)
+        self.h_paned.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.rowconfigure(0, weight=1)
+        
+        # 左侧列容器（连接设置、输出显示、快速命令、文件传输）
+        left_container = ttk.Frame(self.h_paned)
+        self.h_paned.add(left_container, weight=3)
+        
+        # 中间列容器（智能命令编辑）
+        middle_container = ttk.Frame(self.h_paned)
+        self.h_paned.add(middle_container, weight=2)
+        
+        # 右侧列容器（STD输出）
+        right_container = ttk.Frame(self.h_paned)
+        self.h_paned.add(right_container, weight=1)
+        
+        # 绑定PanedWindow大小变化事件，保存布局
+        self.h_paned.bind("<ButtonRelease-1>", self.on_pane_resize)
+        
+        # 设置左侧列布局
+        left_container.columnconfigure(0, weight=1)
+        for i in range(4):
+            left_container.rowconfigure(i, weight=0)
+        left_container.rowconfigure(1, weight=1)  # 输出显示区域可扩展
+        left_container.rowconfigure(3, weight=1)  # 文件传输区域可扩展
+        
+        conn_frame = ttk.LabelFrame(left_container, text="连接设置", padding="10")
         conn_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         conn_frame.columnconfigure(1, weight=1)
         
@@ -1258,7 +1285,7 @@ class TabPage:
         self.status_label.grid(row=3, column=0, columnspan=2, pady=5)
         
         # 输出显示区域
-        output_frame = ttk.LabelFrame(self.frame, text="输出显示", padding="10")
+        output_frame = ttk.LabelFrame(left_container, text="输出显示", padding="10")
         output_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         output_frame.columnconfigure(0, weight=1)
         output_frame.rowconfigure(0, weight=1)
@@ -1315,7 +1342,7 @@ class TabPage:
         self.input_line_range = (self.output_text.index(tk.END), self.output_text.index(tk.END))
         
         # 命令发送区域
-        cmd_send_frame = ttk.LabelFrame(self.frame, text="快速命令发送", padding="10")
+        cmd_send_frame = ttk.LabelFrame(left_container, text="快速命令发送", padding="10")
         cmd_send_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         cmd_send_frame.columnconfigure(0, weight=1)
         
@@ -1343,22 +1370,42 @@ class TabPage:
         common_cmds_frame = ttk.Frame(cmd_send_frame)
         common_cmds_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
         
-        common_commands = ["ls", "pwd", "ifconfig", "ps", "df -h"]
+        # 从配置加载常用命令，如果没有则使用默认值
+        default_commands = ["ls", "pwd", "ifconfig", "ps", "df -h"]
+        common_commands = self.config.get("common_commands", default_commands)
+        # 确保至少有一个命令
+        if not common_commands:
+            common_commands = default_commands
+        
+        # 保存按钮引用以便后续编辑
+        self.common_cmd_buttons = []
+        self.common_commands = common_commands
+        
+        # 创建右键菜单
+        self.common_cmd_menu = tk.Menu(self.root, tearoff=0)
+        self.common_cmd_menu.add_command(label="编辑命令", command=self.edit_common_command)
+        self.editing_cmd_index = None
+        
         for i, cmd in enumerate(common_commands):
             btn = ttk.Button(common_cmds_frame, text=cmd, width=10, 
                            command=lambda c=cmd: self.send_quick_command_text(c))
             btn.grid(row=0, column=i, padx=2)
+            # 绑定右键事件
+            btn.bind("<Button-3>", lambda e, idx=i: self.on_common_cmd_right_click(e, idx))
+            self.common_cmd_buttons.append(btn)
         
         # 文件传输区域（支持SFTP/FTP）
-        file_frame = ttk.LabelFrame(self.frame, text="文件传输 (SFTP/FTP)", padding="10")
+        file_frame = ttk.LabelFrame(left_container, text="文件传输 (SFTP/FTP)", padding="10")
         file_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         file_frame.columnconfigure(0, weight=1)
         file_frame.columnconfigure(1, weight=1)
         file_frame.rowconfigure(1, weight=1)
         
-        # 智能命令编辑区域（右侧列）
-        smart_frame = ttk.LabelFrame(self.frame, text="智能命令编辑", padding="10")
-        smart_frame.grid(row=0, column=1, rowspan=4, sticky=(tk.N, tk.S, tk.E, tk.W), padx=(10, 0))
+        # 智能命令编辑区域（中间列）
+        smart_frame = ttk.LabelFrame(middle_container, text="智能命令编辑", padding="10")
+        smart_frame.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
+        middle_container.columnconfigure(0, weight=1)
+        middle_container.rowconfigure(0, weight=1)
         smart_frame.columnconfigure(0, weight=1)
         smart_frame.rowconfigure(2, weight=1)
 
@@ -1446,9 +1493,11 @@ class TabPage:
         self.smart_output = scrolledtext.ScrolledText(echo_frame, height=5, wrap=tk.WORD, state=tk.DISABLED)
         self.smart_output.pack(fill=tk.BOTH, expand=True)
 
-        # STD调试输出窗口（最右侧）
-        std_frame = ttk.LabelFrame(self.frame, text="STD输出", padding="10")
-        std_frame.grid(row=0, column=2, rowspan=4, sticky=(tk.N, tk.S, tk.E, tk.W), padx=(10, 0))
+        # STD调试输出窗口（右侧列）
+        std_frame = ttk.LabelFrame(right_container, text="STD输出", padding="10")
+        std_frame.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
+        right_container.columnconfigure(0, weight=1)
+        right_container.rowconfigure(0, weight=1)
         std_frame.columnconfigure(0, weight=1)
         std_frame.rowconfigure(0, weight=1)
 
@@ -1575,11 +1624,34 @@ class TabPage:
         self.on_conn_type_changed()
         self.refresh_local_files()
         
+        # 恢复布局配置
+        self.root.after(100, self._restore_layout)
+        
         # 更新滚动区域
         self.update_scroll_region()
         
         # ANSI tag计数器（确保tag名称全局唯一）
         self.ansi_tag_counter = 0
+    
+    def _restore_layout(self):
+        """恢复布局配置"""
+        try:
+            if hasattr(self, 'h_paned') and self.h_paned:
+                layout_config = self.config.get("ui_layout", {})
+                if layout_config:
+                    pane1_size = layout_config.get("horizontal_pane1")
+                    pane2_size = layout_config.get("horizontal_pane2")
+                    if pane1_size:
+                        try:
+                            # 设置第一个分割线位置
+                            self.h_paned.sashpos(0, pane1_size)
+                            # 设置第二个分割线位置（如果存在）
+                            if pane2_size and self.h_paned.index("end") > 2:
+                                self.h_paned.sashpos(1, pane2_size)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
     
     def on_conn_type_changed(self, event=None):
         """连接方式改变时的处理"""
@@ -2069,7 +2141,21 @@ class TabPage:
         except:
             pass
         
-        self.output_text.see(tk.END)
+        # 只在用户已经滚动到底部时才自动滚动到底部
+        # 检查当前可见区域的底部是否接近文本末尾
+        try:
+            # 获取当前可见区域的顶部和底部行号
+            top_line = float(self.output_text.index("@0,0").split('.')[0])
+            bottom_line = float(self.output_text.index("@0,%d" % self.output_text.winfo_height()).split('.')[0])
+            total_lines = float(self.output_text.index(tk.END).split('.')[0])
+            
+            # 如果底部接近末尾（相差不超过2行），则认为用户在看底部，自动滚动
+            if total_lines - bottom_line <= 2:
+                self.output_text.see(tk.END)
+        except:
+            # 如果检查失败，默认滚动到底部（保持原有行为）
+            self.output_text.see(tk.END)
+        
         self.output_text.config(state=tk.NORMAL)
         
         # 如果队列还有数据，缩短下次检查间隔；否则恢复正常间隔
@@ -2468,6 +2554,86 @@ class TabPage:
         self.quick_cmd_entry.delete(0, tk.END)
         self.quick_cmd_entry.insert(0, command)
         self.send_quick_command()
+    
+    def on_common_cmd_right_click(self, event, index):
+        """快速命令按钮右键点击事件"""
+        self.editing_cmd_index = index
+        try:
+            self.common_cmd_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.common_cmd_menu.grab_release()
+    
+    def edit_common_command(self):
+        """编辑常用命令"""
+        if self.editing_cmd_index is None:
+            return
+        
+        if self.editing_cmd_index >= len(self.common_commands):
+            return
+        
+        current_cmd = self.common_commands[self.editing_cmd_index]
+        new_cmd = simpledialog.askstring(
+            "编辑命令",
+            "请输入新的命令：",
+            initialvalue=current_cmd,
+            parent=self.root
+        )
+        
+        if new_cmd is not None:
+            new_cmd = new_cmd.strip()
+            if new_cmd:
+                # 更新命令列表
+                self.common_commands[self.editing_cmd_index] = new_cmd
+                # 更新按钮文本
+                if self.editing_cmd_index < len(self.common_cmd_buttons):
+                    self.common_cmd_buttons[self.editing_cmd_index].config(text=new_cmd)
+                    # 更新按钮命令
+                    self.common_cmd_buttons[self.editing_cmd_index].config(
+                        command=lambda c=new_cmd: self.send_quick_command_text(c)
+                    )
+                # 保存到配置
+                self.config["common_commands"] = self.common_commands.copy()
+                top = self.root.winfo_toplevel()
+                if hasattr(top, 'save_config'):
+                    top.save_config()
+    
+    def on_pane_resize(self, event=None):
+        """PanedWindow大小调整时保存布局"""
+        try:
+            if not hasattr(self, 'h_paned') or not self.h_paned:
+                return
+            # 获取各个pane的大小
+            total_width = self.h_paned.winfo_width()
+            if total_width > 0:
+                # 获取分割线位置
+                try:
+                    sash0_pos = self.h_paned.sashpos(0)
+                    sash1_pos = self.h_paned.sashpos(1) if self.h_paned.index("end") > 2 else None
+                    
+                    # 保存到配置
+                    if "ui_layout" not in self.config:
+                        self.config["ui_layout"] = {}
+                    self.config["ui_layout"]["horizontal_pane1"] = sash0_pos
+                    if sash1_pos is not None:
+                        self.config["ui_layout"]["horizontal_pane2"] = sash1_pos
+                    
+                    # 延迟保存，避免频繁写入
+                    if not hasattr(self, '_layout_save_timer'):
+                        self._layout_save_timer = None
+                    if self._layout_save_timer:
+                        self.root.after_cancel(self._layout_save_timer)
+                    self._layout_save_timer = self.root.after(500, self._save_layout_config)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    def _save_layout_config(self):
+        """保存布局配置"""
+        top = self.root.winfo_toplevel()
+        if hasattr(top, 'save_config'):
+            top.save_config()
+        self._layout_save_timer = None
 
     def get_line_ending(self):
         """根据当前设置返回换行符"""
