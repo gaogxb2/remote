@@ -239,6 +239,31 @@ def ftp_disconnect():
     return sftp_disconnect()
 
 
+def list_remote_files(remote_path=None):
+    """
+    获取远程目录的文件列表（支持SFTP和FTP）
+    参数:
+        remote_path: 远程目录路径，如果为None则使用当前目录
+    返回:
+        list: 文件列表，每个元素为字典，包含 'name', 'size', 'is_dir' 等字段
+              如果未连接或出错，返回空列表
+    """
+    tab = _require_active_tab()
+    
+    if not tab.file_connector or not tab.file_connector.connected:
+        return []
+    
+    try:
+        if remote_path is None:
+            # 使用当前远程路径
+            remote_path = tab.remote_path if hasattr(tab, 'remote_path') else "."
+        
+        files = tab.file_connector.list_files(str(remote_path))
+        return files if files else []
+    except Exception as e:
+        return []
+
+
 def tcp(host, port):
     """通过TCP网口连接单板"""
     tab = _require_active_tab()
@@ -1387,7 +1412,7 @@ class TabPage:
             "wait_for_confirmation",
             "start_receive", "get_receive", "end_receive",
             "send_file", "sftp_connect", "sftp_disconnect",
-            "ftp_connect", "ftp_disconnect",
+            "ftp_connect", "ftp_disconnect", "list_remote_files",
             "print", "wait"
         ]
         
@@ -2755,6 +2780,7 @@ class TabPage:
             "• sftp_disconnect(): 关闭SFTP连接，返回True/False\n"
             "• ftp_connect(host, port, user, pwd): 建立FTP连接，返回True/False\n"
             "• ftp_disconnect(): 关闭FTP连接，返回True/False\n"
+            "• list_remote_files(path=None): 获取远程目录文件列表，返回包含name/size/is_dir的字典列表\n"
             "• print(...): 将信息输出到脚本输出窗口\n"
             "• wait(seconds): 等同于 time.sleep，用于延时\n\n"
             "可以编写多行 Python 代码，例如循环发送命令、等待回显等。"
@@ -2787,6 +2813,7 @@ class TabPage:
                 "sftp_disconnect": sftp_disconnect,
                 "ftp_connect": ftp_connect,
                 "ftp_disconnect": ftp_disconnect,
+                "list_remote_files": list_remote_files,
                 "wait": time.sleep,
                 "sleep": time.sleep
             }
