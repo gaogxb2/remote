@@ -1088,8 +1088,21 @@ class TabPage:
         # 初始化文件图标
         self.init_file_icons()
         
-        # ANSI颜色解析相关
+        # ANSI颜色解析相关 - 预编译所有常用的正则表达式以减少开销
         self.ansi_pattern = re.compile(r'\033(?:\033\[|\[)([0-9;]*)m')
+        # 日志清理用的ANSI序列移除
+        self.ansi_clean_pattern = re.compile(r'\033\[[0-9;]*m')
+        # 检测未完成的CSI序列
+        self.incomplete_csi_pattern = re.compile(r'\033\[[0-9;?]*$')
+        # 检测未完成的OSC序列
+        self.incomplete_osc_pattern = re.compile(r'\033\][^\007]*$')
+        # 清屏和清行控制序列（合并为一个正则）
+        self.clear_sequences_pattern = re.compile(r'\033\[\d*[JK]')
+        # 智能命令代码补全用的函数名匹配
+        self.function_name_pattern = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)$')
+        # 标签页名称数字提取
+        self.tab_number_pattern = re.compile(r'(\d+)$')
+        
         self.current_fg_color = "#FFFFFF"  # 默认白色
         self.current_bg_color = None  # 默认背景色
         
@@ -2051,8 +2064,8 @@ class TabPage:
         # 如果启用了日志记录，写入日志文件
         if self.log_enabled and self.log_file:
             try:
-                # 移除ANSI转义序列后写入日志
-                clean_text = re.sub(r'\033\[[0-9;]*m', '', text)
+                # 移除ANSI转义序列后写入日志（使用预编译的正则）
+                clean_text = self.ansi_clean_pattern.sub('', text)
                 self.log_file.write(clean_text)
                 self.log_file.flush()  # 实时写入
             except Exception as e:
@@ -2353,11 +2366,11 @@ class TabPage:
         if text.endswith("\033"):
             return text[:-1], "\033"
         # 匹配未完成的CSI序列（以 \033[ 开头但尚未有终止符）
-        match = re.search(r'\033\[[0-9;?]*$', text)
+        match = self.incomplete_csi_pattern.search(text)
         if match:
             return text[:match.start()], text[match.start():]
         # 匹配未完成的OSC序列（\033] ... 尚未遇到BEL或ESC\\）
-        match = re.search(r'\033\][^\007]*$', text)
+        match = self.incomplete_osc_pattern.search(text)
         if match:
             return text[:match.start()], text[match.start():]
         return text, ""
@@ -2366,10 +2379,8 @@ class TabPage:
         """移除无需显示的控制序列（例如清屏）"""
         if not text:
             return text
-        # 去掉 \033[J / \033[0J / \033[1J / \033[2J
-        text = re.sub(r'\033\[\d*J', '', text)
-        # 去掉 \033[K 等清行命令
-        text = re.sub(r'\033\[\d*K', '', text)
+        # 去掉 \033[J / \033[0J / \033[1J / \033[2J 和 \033[K 等清行命令（使用预编译的正则）
+        text = self.clear_sequences_pattern.sub('', text)
         return text
     
     def insert_ansi_text(self, start_pos, text):
@@ -2917,9 +2928,8 @@ class TabPage:
             line_text = self.smart_text.get(line_start, cursor_pos)
             
             # 使用正则表达式匹配函数名（字母、数字、下划线）
-            import re
-            # 匹配最后一个可能的函数名（从字母或下划线开始）
-            match = re.search(r'([a-zA-Z_][a-zA-Z0-9_]*)$', line_text)
+            # 匹配最后一个可能的函数名（从字母或下划线开始，使用预编译的正则）
+            match = self.function_name_pattern.search(line_text)
             if match:
                 partial_name = match.group(1)
                 
@@ -4093,6 +4103,9 @@ class DeviceConnectionApp:
         # 配置文件路径
         self.config_file = os.path.join(os.path.expanduser("~"), ".单板连接工具_config.json")
         
+        # 预编译正则表达式以减少开销
+        self.tab_number_pattern = re.compile(r'(\d+)$')
+        
         # 加载配置
         self.config = self.load_config()
         
@@ -4183,7 +4196,7 @@ class DeviceConnectionApp:
             tab_name = f"单板 {self.tab_counter}"
             self.tab_counter += 1
         else:
-            match = re.search(r'(\d+)$', tab_name.strip())
+            match = self.tab_number_pattern.search(tab_name.strip())
             if match:
                 next_idx = int(match.group(1)) + 1
                 if next_idx > self.tab_counter:
