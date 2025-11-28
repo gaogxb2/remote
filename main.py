@@ -1076,8 +1076,14 @@ class TabPage:
             "file_transfer": {},
             "smart_templates": self.smart_templates.copy(),
             "smart_code": "",
-            "line_ending_crlf": False
+            "line_ending_crlf": False,
+            "show_output_display": True,
+            "show_std_output": False
         }
+        
+        # 初始化显示控制变量（需要在config初始化之后）
+        self.show_output_display = tk.BooleanVar(value=self.config.get("show_output_display", True))
+        self.show_std_output = tk.BooleanVar(value=self.config.get("show_std_output", False))
         
         # 初始化文件图标
         self.init_file_icons()
@@ -1339,6 +1345,13 @@ class TabPage:
         # 日志记录开关
         self.log_checkbox = ttk.Checkbutton(output_buttons, text="记录日志", command=self.toggle_log)
         self.log_checkbox.pack(side=tk.LEFT, padx=5)
+        self.output_display_checkbox = ttk.Checkbutton(
+            output_buttons,
+            text="显示输出",
+            variable=self.show_output_display,
+            command=self.on_show_output_toggle
+        )
+        self.output_display_checkbox.pack(side=tk.LEFT, padx=5)
         self.input_line_range = (self.output_text.index(tk.END), self.output_text.index(tk.END))
         
         # 命令发送区域
@@ -1509,6 +1522,14 @@ class TabPage:
             font=("Consolas", 10)
         )
         self.std_output.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.E, tk.W))
+        std_options = ttk.Frame(std_frame)
+        std_options.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        ttk.Checkbutton(
+            std_options,
+            text="打印STD输出",
+            variable=self.show_std_output,
+            command=self.on_show_std_output_toggle
+        ).pack(side=tk.LEFT)
         
         # 文件连接设置
         file_conn_frame = ttk.Frame(file_frame)
@@ -2083,7 +2104,7 @@ class TabPage:
             if remainder:
                 self.partial_output = remainder
             
-            if text:
+            if text and self.is_output_display_enabled():
                 # 移除清除屏幕的控制序列（如 \033[J, \033[K）
                 text = self.strip_control_sequences(text)
                 
@@ -2128,33 +2149,34 @@ class TabPage:
                         # 忽略错误
                         pass
         
-        # 检查并限制最大行数（最多保留1000行）
-        try:
-            line_count = int(self.output_text.index(tk.END).split('.')[0])
-            max_lines = 1000
-            if line_count > max_lines:
-                # 计算需要删除的行数
-                lines_to_delete = line_count - max_lines
-                # 删除最前面的行
-                delete_end = self.output_text.index(f"{lines_to_delete + 1}.0")
-                self.output_text.delete("1.0", delete_end)
-        except:
-            pass
-        
-        # 只在用户已经滚动到底部时才自动滚动到底部
-        # 检查当前可见区域的底部是否接近文本末尾
-        try:
-            # 获取当前可见区域的顶部和底部行号
-            top_line = float(self.output_text.index("@0,0").split('.')[0])
-            bottom_line = float(self.output_text.index("@0,%d" % self.output_text.winfo_height()).split('.')[0])
-            total_lines = float(self.output_text.index(tk.END).split('.')[0])
+        if self.is_output_display_enabled():
+            # 检查并限制最大行数（最多保留1000行）
+            try:
+                line_count = int(self.output_text.index(tk.END).split('.')[0])
+                max_lines = 1000
+                if line_count > max_lines:
+                    # 计算需要删除的行数
+                    lines_to_delete = line_count - max_lines
+                    # 删除最前面的行
+                    delete_end = self.output_text.index(f"{lines_to_delete + 1}.0")
+                    self.output_text.delete("1.0", delete_end)
+            except:
+                pass
             
-            # 如果底部接近末尾（相差不超过2行），则认为用户在看底部，自动滚动
-            if total_lines - bottom_line <= 2:
+            # 只在用户已经滚动到底部时才自动滚动到底部
+            # 检查当前可见区域的底部是否接近文本末尾
+            try:
+                # 获取当前可见区域的顶部和底部行号
+                top_line = float(self.output_text.index("@0,0").split('.')[0])
+                bottom_line = float(self.output_text.index("@0,%d" % self.output_text.winfo_height()).split('.')[0])
+                total_lines = float(self.output_text.index(tk.END).split('.')[0])
+                
+                # 如果底部接近末尾（相差不超过2行），则认为用户在看底部，自动滚动
+                if total_lines - bottom_line <= 2:
+                    self.output_text.see(tk.END)
+            except:
+                # 如果检查失败，默认滚动到底部（保持原有行为）
                 self.output_text.see(tk.END)
-        except:
-            # 如果检查失败，默认滚动到底部（保持原有行为）
-            self.output_text.see(tk.END)
         
         self.output_text.config(state=tk.NORMAL)
         
@@ -2311,6 +2333,11 @@ class TabPage:
         """在STD输出窗口中记录调试信息"""
         if not hasattr(self, "std_output"):
             return
+        try:
+            if hasattr(self, "show_std_output") and not self.show_std_output.get():
+                return
+        except Exception:
+            pass
         formatted = self.format_raw_text(raw_text)
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.std_output.config(state=tk.NORMAL)
@@ -2462,6 +2489,26 @@ class TabPage:
         else:
             # 禁用日志记录
             self.stop_logging()
+    
+    def on_show_output_toggle(self):
+        """切换是否显示输出"""
+        self.config["show_output_display"] = bool(self.show_output_display.get())
+        top = self.root.winfo_toplevel()
+        if hasattr(top, 'save_config'):
+            top.save_config()
+    
+    def is_output_display_enabled(self):
+        try:
+            return bool(self.show_output_display.get())
+        except Exception:
+            return True
+    
+    def on_show_std_output_toggle(self):
+        """切换是否打印STD输出"""
+        self.config["show_std_output"] = bool(self.show_std_output.get())
+        top = self.root.winfo_toplevel()
+        if hasattr(top, 'save_config'):
+            top.save_config()
     
     def start_logging(self):
         """开始记录日志"""
@@ -3533,6 +3580,11 @@ class TabPage:
         self.config["line_ending_crlf"] = line_ending_crlf
         self.apply_line_ending_to_connector()
         
+        if "show_output_display" in config:
+            self.show_output_display.set(bool(config.get("show_output_display", True)))
+        if "show_std_output" in config:
+            self.show_std_output.set(bool(config.get("show_std_output", False)))
+        
         # 恢复文件传输配置
         file_config = config.get("file_transfer") or config.get("sftp")
         if file_config:
@@ -3904,7 +3956,7 @@ class DebugWindow:
             if remainder:
                 tab_page.partial_output = remainder
             
-            if text:
+            if text and tab_page.is_output_display_enabled():
                 # 移除清除屏幕的控制序列（如 \033[J, \033[K）
                 text = tab_page.strip_control_sequences(text)
                 
@@ -3949,20 +4001,21 @@ class DebugWindow:
                         # 忽略错误
                         pass
         
-        # 检查并限制最大行数（最多保留1000行）
-        try:
-            line_count = int(tab_page.output_text.index(tk.END).split('.')[0])
-            max_lines = 1000
-            if line_count > max_lines:
-                # 计算需要删除的行数
-                lines_to_delete = line_count - max_lines
-                # 删除最前面的行
-                delete_end = tab_page.output_text.index(f"{lines_to_delete + 1}.0")
-                tab_page.output_text.delete("1.0", delete_end)
-        except:
-            pass
-        
-        tab_page.output_text.see(tk.END)
+        if tab_page.is_output_display_enabled():
+            # 检查并限制最大行数（最多保留1000行）
+            try:
+                line_count = int(tab_page.output_text.index(tk.END).split('.')[0])
+                max_lines = 1000
+                if line_count > max_lines:
+                    # 计算需要删除的行数
+                    lines_to_delete = line_count - max_lines
+                    # 删除最前面的行
+                    delete_end = tab_page.output_text.index(f"{lines_to_delete + 1}.0")
+                    tab_page.output_text.delete("1.0", delete_end)
+            except:
+                pass
+            
+            tab_page.output_text.see(tk.END)
         tab_page.output_text.config(state=tk.NORMAL)
     
     def show_test_results(self, tab_page, test_case):
