@@ -3590,6 +3590,20 @@ class TabPage:
         self.config["line_ending_crlf"] = line_ending_crlf
         self.apply_line_ending_to_connector()
         
+        # 恢复快速命令
+        if "common_commands" in config:
+            common_commands = config.get("common_commands", [])
+            if common_commands:
+                self.common_commands = common_commands.copy()
+                self.config["common_commands"] = self.common_commands.copy()
+                # 更新按钮
+                for i, cmd in enumerate(self.common_commands):
+                    if i < len(self.common_cmd_buttons):
+                        self.common_cmd_buttons[i].config(text=cmd)
+                        self.common_cmd_buttons[i].config(
+                            command=lambda c=cmd: self.send_quick_command_text(c)
+                        )
+        
         if "show_output_display" in config:
             self.show_output_display.set(bool(config.get("show_output_display", True)))
         if "show_std_output" in config:
