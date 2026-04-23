@@ -64,6 +64,7 @@ import serial
 import serial.tools.list_ports
 import paramiko
 _current_send_handler = None
+_current_send_raw_handler = None
 _current_tab = None
 
 
@@ -71,6 +72,12 @@ def register_send_handler(handler):
     """注册全局发送函数的处理器"""
     global _current_send_handler
     _current_send_handler = handler
+
+
+def register_send_raw_handler(handler):
+    """注册全局原样发送函数的处理器（不自动追加行尾）"""
+    global _current_send_raw_handler
+    _current_send_raw_handler = handler
 
 
 def register_active_tab(tab_page):
@@ -111,6 +118,15 @@ def send(command):
     if not _current_send_handler:
         raise RuntimeError("当前没有可用的连接，请先选择一个已连接的标签页。")
     return _current_send_handler(command)
+
+
+def send_raw(command):
+    """全局原样发送函数：send_raw("abc")（不自动追加行尾）"""
+    if not isinstance(command, str):
+        raise TypeError("send_raw() 只接受字符串参数")
+    if not _current_send_raw_handler:
+        raise RuntimeError("当前没有可用的连接，请先选择一个已连接的标签页。")
+    return _current_send_raw_handler(command)
 
 
 def start_receive():
@@ -457,7 +473,7 @@ class TCPConnector(DeviceConnector):
             self.socket = None
     
     def send_command(self, command):
-        """发送命令或字符（如果是单个字符，不添加换行符）"""
+        """发送命令或字符（自动按配置追加行尾）"""
         if not self.connected or not self.socket:
             return False
         try:
@@ -472,11 +488,8 @@ class TCPConnector(DeviceConnector):
             # 对于单独的回车/退格，直接发送
             elif command in ['\r', '\b', '\x08']:
                 data = command.encode('utf-8')
-            elif len(command) == 1:
-                # 单个字符，直接发送
-                data = command.encode('utf-8')
             else:
-                # 多个字符的命令，添加换行符
+                # 其他命令统一添加换行符
                 data = (command + line_ending).encode('utf-8')
             
             self.socket.sendall(data)
@@ -486,6 +499,24 @@ class TCPConnector(DeviceConnector):
         except Exception as e:
             self.output_callback(f"[错误] 发送失败: {str(e)}\n")
             # 尝试恢复阻塞模式
+            try:
+                self.socket.setblocking(False)
+            except:
+                pass
+            return False
+
+    def send_raw_command(self, command):
+        """原样发送，不自动追加行尾"""
+        if not self.connected or not self.socket:
+            return False
+        try:
+            was_blocking = self.socket.getblocking()
+            self.socket.setblocking(True)
+            self.socket.sendall(command.encode('utf-8'))
+            self.socket.setblocking(was_blocking)
+            return True
+        except Exception as e:
+            self.output_callback(f"[错误] 发送失败: {str(e)}\n")
             try:
                 self.socket.setblocking(False)
             except:
@@ -605,7 +636,7 @@ class TelnetConnector(DeviceConnector):
             self.socket = None
     
     def send_command(self, command):
-        """发送命令或字符（如果是单个字符，不添加换行符）"""
+        """发送命令或字符（自动按配置追加行尾）"""
         if not self.connected or not self.socket:
             return False
         try:
@@ -615,13 +646,21 @@ class TelnetConnector(DeviceConnector):
                 data = line_ending.encode('utf-8')
             elif command in ['\r', '\b', '\x08']:
                 data = command.encode('utf-8')
-            elif len(command) == 1:
-                # 单个字符，直接发送
-                data = command.encode('utf-8')
             else:
-                # 多个字符的命令，添加换行符
+                # 其他命令统一添加换行符
                 data = (command + line_ending).encode('utf-8')
             self.socket.write(data)
+            return True
+        except Exception as e:
+            self.output_callback(f"[错误] 发送失败: {str(e)}\n")
+            return False
+
+    def send_raw_command(self, command):
+        """原样发送，不自动追加行尾"""
+        if not self.connected or not self.socket:
+            return False
+        try:
+            self.socket.write(command.encode('utf-8'))
             return True
         except Exception as e:
             self.output_callback(f"[错误] 发送失败: {str(e)}\n")
@@ -700,7 +739,7 @@ class SerialConnector(DeviceConnector):
             self.socket = None
     
     def send_command(self, command):
-        """发送命令或字符（如果是单个字符，不添加换行符）"""
+        """发送命令或字符（自动按配置追加行尾）"""
         if not self.connected or not self.socket:
             return False
         try:
@@ -710,13 +749,21 @@ class SerialConnector(DeviceConnector):
                 data = line_ending.encode('utf-8')
             elif command in ['\r', '\b', '\x08']:
                 data = command.encode('utf-8')
-            elif len(command) == 1:
-                # 单个字符，直接发送
-                data = command.encode('utf-8')
             else:
-                # 多个字符的命令，添加换行符
+                # 其他命令统一添加换行符
                 data = (command + line_ending).encode('utf-8')
             self.socket.write(data)
+            return True
+        except Exception as e:
+            self.output_callback(f"[错误] 发送失败: {str(e)}\n")
+            return False
+
+    def send_raw_command(self, command):
+        """原样发送，不自动追加行尾"""
+        if not self.connected or not self.socket:
+            return False
+        try:
+            self.socket.write(command.encode('utf-8'))
             return True
         except Exception as e:
             self.output_callback(f"[错误] 发送失败: {str(e)}\n")
@@ -1797,6 +1844,15 @@ class TabPage:
         
         # 发送命令到单板
         return self.connector.send_command(command)
+
+    def send_raw_command(self, command):
+        """发送原始命令（不自动追加行尾）"""
+        if not self.connector or not self.connector.connected:
+            messagebox.showwarning("警告", "请先连接设备")
+            return False
+        if command is None:
+            return False
+        return self.connector.send_raw_command(command)
     
     
     def get_input_command(self):
@@ -2011,9 +2067,9 @@ class TabPage:
         if self.output_text.cget("state") == tk.DISABLED:
             self.output_text.config(state=tk.NORMAL)
 
-        line = ''.join(self.input_buffer)
         try:
-            self.connector.send_command(line)
+            # 回车只发送换行符，避免逐字实时发送后再次整行发送导致重复回显/空行
+            self.connector.send_command('\n')
         except Exception:
             pass
         self.reset_input_buffer()
@@ -2078,6 +2134,15 @@ class TabPage:
         max_chunks_per_frame = 50    # 每帧最多处理的chunk数
         processed_chars = 0
         processed_chunks = 0
+        
+        # 先记录当前是否接近底部。必须在插入新内容前判断，否则新增多行后会误判。
+        should_autoscroll = False
+        if self.is_output_display_enabled():
+            try:
+                _, visible_bottom = self.output_text.yview()
+                should_autoscroll = visible_bottom >= 0.98
+            except Exception:
+                should_autoscroll = True
         
         self.output_text.config(state=tk.NORMAL)
         
@@ -2176,19 +2241,8 @@ class TabPage:
             except:
                 pass
             
-            # 只在用户已经滚动到底部时才自动滚动到底部
-            # 检查当前可见区域的底部是否接近文本末尾
-            try:
-                # 获取当前可见区域的顶部和底部行号
-                top_line = float(self.output_text.index("@0,0").split('.')[0])
-                bottom_line = float(self.output_text.index("@0,%d" % self.output_text.winfo_height()).split('.')[0])
-                total_lines = float(self.output_text.index(tk.END).split('.')[0])
-                
-                # 如果底部接近末尾（相差不超过2行），则认为用户在看底部，自动滚动
-                if total_lines - bottom_line <= 2:
-                    self.output_text.see(tk.END)
-            except:
-                # 如果检查失败，默认滚动到底部（保持原有行为）
+            # 只在插入前已经在底部时，才自动跟随到最新输出
+            if should_autoscroll:
                 self.output_text.see(tk.END)
         
         self.output_text.config(state=tk.NORMAL)
@@ -2988,6 +3042,7 @@ class TabPage:
         help_text = (
             "智能命令编辑支持以下内置函数：\n"
             "• send(cmd): 发送字符串命令到当前连接\n"
+            "• send_raw(cmd): 原样发送字符串，不自动追加行尾\n"
             "• tcp(host, port): 使用TCP网口连接单板\n"
             "• telnet(host, port): 使用Telnet连接单板\n"
             "• com(port, baudrate=115200): 使用串口连接单板\n"
@@ -3021,6 +3076,7 @@ class TabPage:
         def worker():
             local_context = {
                 "send": send,
+                "send_raw": send_raw,
                 "tcp": tcp,
                 "telnet": telnet,
                 "com": com,
@@ -4452,6 +4508,7 @@ class DeviceConnectionApp:
         tab_page = self.tabs.get(tab_name)
         if tab_page:
             register_send_handler(tab_page.send_command)
+            register_send_raw_handler(tab_page.send_raw_command)
             register_active_tab(tab_page)
     
     def open_debug_window(self):
