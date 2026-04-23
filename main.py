@@ -1115,6 +1115,9 @@ class TabPage:
         }
         self.current_template_name = ""
         self.last_smart_code = ""
+        self.smart_script_thread = None
+        self.smart_stop_event = None
+        self.smart_run_id = 0
         
         # 配置信息
         self.config = {
@@ -1528,7 +1531,7 @@ class TabPage:
         
         # 定义可用的函数名列表（用于代码补全）
         self.smart_functions = [
-            "send", "tcp", "telnet", "com", "disconnect", "get_ip_address", "pop",
+            "send", "send_raw", "tcp", "telnet", "com", "disconnect", "get_ip_address", "pop",
             "wait_for_confirmation",
             "start_receive", "get_receive", "end_receive",
             "send_file", "sftp_connect", "sftp_disconnect",
@@ -1547,8 +1550,13 @@ class TabPage:
         smart_btn_frame.grid(row=3, column=0, sticky=tk.EW, pady=(2, 0))
         ttk.Button(smart_btn_frame, text="发送智能命令", command=self.send_smart_command).pack(
             side=tk.LEFT, padx=5)
-        ttk.Button(smart_btn_frame, text="以Python执行", command=self.run_smart_python).pack(
+        self.smart_run_btn = ttk.Button(smart_btn_frame, text="以Python执行", command=self.run_smart_python)
+        self.smart_run_btn.pack(
             side=tk.LEFT, padx=5)
+        self.smart_stop_btn = ttk.Button(
+            smart_btn_frame, text="停止执行", command=self.stop_smart_python, state=tk.DISABLED
+        )
+        self.smart_stop_btn.pack(side=tk.LEFT, padx=5)
         ttk.Button(smart_btn_frame, text="清空", command=lambda: self.smart_text.delete("1.0", tk.END)).pack(
             side=tk.LEFT, padx=5)
         ttk.Button(smart_btn_frame, text="保存代码", command=self.manual_save_smart_code).pack(
@@ -3073,17 +3081,60 @@ class TabPage:
             return
         self.save_current_smart_code()
         
+        # 若已有脚本在运行，先请求停止旧线程
+        if self.smart_script_thread and self.smart_script_thread.is_alive():
+            self.request_stop_smart_python(reason="检测到新的执行请求，正在停止旧脚本")
+            self.smart_script_thread.join(timeout=1.0)
+            if self.smart_script_thread.is_alive():
+                self.smart_print("[脚本] 旧脚本仍在退出中，新脚本将继续启动")
+        
+        self.smart_run_id += 1
+        run_id = self.smart_run_id
+        stop_event = threading.Event()
+        self.smart_stop_event = stop_event
+        self.set_smart_running_state(True)
+        
         def worker():
+            def ensure_not_stopped():
+                if stop_event.is_set():
+                    raise RuntimeError("脚本已停止")
+            
+            def _wait(seconds):
+                seconds = float(seconds)
+                if seconds <= 0:
+                    ensure_not_stopped()
+                    return
+                deadline = time.time() + seconds
+                while True:
+                    ensure_not_stopped()
+                    remain = deadline - time.time()
+                    if remain <= 0:
+                        break
+                    time.sleep(min(0.1, remain))
+            
+            def _send(command):
+                ensure_not_stopped()
+                return send(command)
+            
+            def _send_raw(command):
+                ensure_not_stopped()
+                return send_raw(command)
+            
+            def _wait_for_confirmation(message):
+                ensure_not_stopped()
+                wait_for_confirmation(message)
+                ensure_not_stopped()
+            
             local_context = {
-                "send": send,
-                "send_raw": send_raw,
+                "send": _send,
+                "send_raw": _send_raw,
                 "tcp": tcp,
                 "telnet": telnet,
                 "com": com,
                 "disconnect": disconnect,
                 "get_ip_address": get_ip_address,
                 "pop": pop,
-                "wait_for_confirmation": wait_for_confirmation,
+                "wait_for_confirmation": _wait_for_confirmation,
                 "start_receive": start_receive,
                 "end_receive": end_receive,
                 "get_receive": get_receive,
@@ -3093,20 +3144,58 @@ class TabPage:
                 "ftp_connect": ftp_connect,
                 "ftp_disconnect": ftp_disconnect,
                 "list_remote_files": list_remote_files,
-                "wait": time.sleep,
-                "sleep": time.sleep
+                "wait": _wait,
+                "sleep": _wait
             }
             try:
                 def _print(*args, **kwargs):
                     msg = " ".join(str(arg) for arg in args)
                     self.smart_print(msg)
                 local_context["print"] = _print
+                ensure_not_stopped()
                 exec(code, {"__builtins__": __builtins__}, local_context)
+                ensure_not_stopped()
                 self.smart_print("[脚本] 执行完成")
             except Exception as e:
                 self.smart_print(f"[错误] {e}")
+            finally:
+                self.root.after(0, lambda: self.finish_smart_python_run(run_id))
         
-        threading.Thread(target=worker, daemon=True).start()
+        self.smart_script_thread = threading.Thread(target=worker, daemon=True)
+        self.smart_script_thread.start()
+    
+    def set_smart_running_state(self, is_running):
+        """更新智能脚本运行态按钮状态"""
+        if hasattr(self, "smart_run_btn"):
+            self.smart_run_btn.config(state=tk.DISABLED if is_running else tk.NORMAL)
+        if hasattr(self, "smart_stop_btn"):
+            self.smart_stop_btn.config(state=tk.NORMAL if is_running else tk.DISABLED)
+    
+    def request_stop_smart_python(self, reason=None):
+        """请求停止当前智能脚本线程（协作式）"""
+        if self.smart_stop_event:
+            self.smart_stop_event.set()
+        # 如果脚本在等待用户确认，主动唤醒等待以便尽快退出
+        if hasattr(self, "pop_confirmation_event"):
+            self.pop_confirmation_event.set()
+        if reason:
+            self.smart_print(f"[脚本] {reason}")
+    
+    def stop_smart_python(self):
+        """手动停止智能脚本执行"""
+        if self.smart_script_thread and self.smart_script_thread.is_alive():
+            self.request_stop_smart_python(reason="已请求停止")
+        else:
+            self.smart_print("[脚本] 当前没有正在执行的脚本")
+            self.set_smart_running_state(False)
+    
+    def finish_smart_python_run(self, run_id):
+        """线程结束后的清理，避免旧线程覆盖新线程状态"""
+        if run_id != self.smart_run_id:
+            return
+        self.set_smart_running_state(False)
+        self.smart_script_thread = None
+        self.smart_stop_event = None
     
     def save_smart_templates(self):
         """保存智能模板到配置"""
@@ -3692,6 +3781,7 @@ class TabPage:
     
     def cleanup(self):
         """清理资源"""
+        self.request_stop_smart_python()
         # 停止日志记录
         if self.log_enabled:
             self.stop_logging()
