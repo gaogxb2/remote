@@ -129,6 +129,31 @@ def send_raw(command):
     return _current_send_raw_handler(command)
 
 
+def send_chunked(command, chunk_size=5, delay_ms=20):
+    """分片发送函数：send_chunked("very_long_cmd", 5, 20)"""
+    if not isinstance(command, str):
+        raise TypeError("send_chunked() 只接受字符串参数")
+    if not isinstance(chunk_size, int) or chunk_size <= 0:
+        raise ValueError("chunk_size 必须是大于0的整数")
+    if not isinstance(delay_ms, (int, float)) or delay_ms < 0:
+        raise ValueError("delay_ms 必须是大于等于0的数字")
+    if not _current_send_handler or not _current_send_raw_handler:
+        raise RuntimeError("当前没有可用的连接，请先选择一个已连接的标签页。")
+    
+    # 空命令保持与 send("") 一致：只发送行尾
+    if command == "":
+        return _current_send_handler("")
+    
+    # 先按固定块长原样发送，再补一次行尾，语义等同 send(command)
+    for i in range(0, len(command), chunk_size):
+        part = command[i:i + chunk_size]
+        if not _current_send_raw_handler(part):
+            return False
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
+    return _current_send_handler("")
+
+
 def start_receive():
     """开始捕获单板回显"""
     tab = _require_active_tab()
@@ -1531,7 +1556,7 @@ class TabPage:
         
         # 定义可用的函数名列表（用于代码补全）
         self.smart_functions = [
-            "send", "send_raw", "tcp", "telnet", "com", "disconnect", "get_ip_address", "pop",
+            "send", "send_raw", "send_chunked", "tcp", "telnet", "com", "disconnect", "get_ip_address", "pop",
             "wait_for_confirmation",
             "start_receive", "get_receive", "end_receive",
             "send_file", "sftp_connect", "sftp_disconnect",
@@ -3051,6 +3076,7 @@ class TabPage:
             "智能命令编辑支持以下内置函数：\n"
             "• send(cmd): 发送字符串命令到当前连接\n"
             "• send_raw(cmd): 原样发送字符串，不自动追加行尾\n"
+            "• send_chunked(cmd, chunk_size=5, delay_ms=20): 按块拆分发送，默认每次最多5字符、每块间隔20ms，最后自动追加一次行尾\n"
             "• tcp(host, port): 使用TCP网口连接单板\n"
             "• telnet(host, port): 使用Telnet连接单板\n"
             "• com(port, baudrate=115200): 使用串口连接单板\n"
@@ -3120,6 +3146,27 @@ class TabPage:
                 ensure_not_stopped()
                 return send_raw(command)
             
+            def _send_chunked(command, chunk_size=5, delay_ms=20):
+                ensure_not_stopped()
+                if not isinstance(command, str):
+                    raise TypeError("send_chunked() 只接受字符串参数")
+                if not isinstance(chunk_size, int) or chunk_size <= 0:
+                    raise ValueError("chunk_size 必须是大于0的整数")
+                if not isinstance(delay_ms, (int, float)) or delay_ms < 0:
+                    raise ValueError("delay_ms 必须是大于等于0的数字")
+                if command == "":
+                    ensure_not_stopped()
+                    return send("")
+                for i in range(0, len(command), chunk_size):
+                    ensure_not_stopped()
+                    part = command[i:i + chunk_size]
+                    if not send_raw(part):
+                        return False
+                    if delay_ms > 0:
+                        _wait(delay_ms / 1000.0)
+                ensure_not_stopped()
+                return send("")
+            
             def _wait_for_confirmation(message):
                 ensure_not_stopped()
                 wait_for_confirmation(message)
@@ -3128,6 +3175,7 @@ class TabPage:
             local_context = {
                 "send": _send,
                 "send_raw": _send_raw,
+                "send_chunked": _send_chunked,
                 "tcp": tcp,
                 "telnet": telnet,
                 "com": com,
